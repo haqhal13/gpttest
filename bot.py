@@ -1135,12 +1135,6 @@ async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception:
         pass
-        
-async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mark user as paid and schedule membership expiry reminders."""
-    user_id = update.effective_user.id
-    USERS[user_id] = {"paid": True, "lang": user_lang(user_id)}
-    save_data()
 
     # 1h reminder cancellation if they paid
     job_1h = context.job_queue.get_jobs_by_name(f"reminder1h_{user_id}")
