@@ -1,8 +1,3 @@
-Here you go — full bot.py (clean start, single reminder scheduler, deploy‑ready). Copy–paste this whole file:
-
-# bot.py — VIP Bot (multilingual + flags + reminders + expiry + mini-app links; preserves your original texts/buttons)
-# Run (Render): gunicorn bot:app --bind 0.0.0.0:$PORT --worker-class uvicorn.workers.UvicornWorker
-
 import os
 import json
 import logging
