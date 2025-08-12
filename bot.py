@@ -16,9 +16,9 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # Config (env overrides)
 # =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "7709257840:AAHHDafzkhvwMcHMfQuNd1XJTFlTAAd14As")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://bot-1-f2wh.onrender.com/webhook")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://gpttest-xrfu.onrender.com/webhook")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "CHANGE_ME_TO_A_LONG_RANDOM_STRING")
-UPTIME_MONITOR_URL = os.getenv("UPTIME_MONITOR_URL", "https://bot-1-f2wh.onrender.com/uptime")
+UPTIME_MONITOR_URL = os.getenv("UPTIME_MONITOR_URL", "https://gpttest-xrfu.onrender.com/uptime")
 SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "@Sebvip")
 ADMIN_CHAT_ID_ENV = os.getenv("ADMIN_CHAT_ID", "7914196017")
 ADMIN_CHAT_ID: Optional[int] = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV.isdigit() else None
