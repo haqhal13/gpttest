@@ -4,13 +4,13 @@ import json
 import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 
 import httpx
 from fastapi import FastAPI, Request, Header, HTTPException, Response
 from fastapi.responses import JSONResponse
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, Message, CallbackQuery
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, CallbackQuery
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes,
@@ -35,7 +35,7 @@ REMINDERS_MINUTES = os.getenv("REMINDERS", "60,360,1440")  # 1h, 6h, 24h
 REMINDER_STEPS = [int(x) for x in REMINDERS_MINUTES.split(",") if x.strip().isdigit()]
 
 # Coupons (format: "SPRING10=10,VIP5=5")
-COUPONS_RAW = os.getenv("COUPONS", "")  # optional
+COUPONS_RAW = os.getenv("COUPONS", "")
 COUPONS: Dict[str, int] = {}
 for part in COUPONS_RAW.split(","):
     if "=" in part:
@@ -43,7 +43,7 @@ for part in COUPONS_RAW.split(","):
         if v.strip().isdigit():
             COUPONS[k.strip().upper()] = int(v.strip())
 
-# Payment Information (kept as you wrote; links open via Mini Apps)
+# Payment Information
 PAYMENT_INFO = {
     "shopify": {
         "1_month": os.getenv("PAY_1M", "https://nt9qev-td.myshopify.com/cart/55619895394678:1"),
@@ -65,10 +65,8 @@ MEDIA_LINKS = [
 ]
 HAS_MEDIA = any(url.strip() for _, url in MEDIA_LINKS)
 
-# Multi-language (auto-detect + manual). Fallback to 'en' for missing keys.
+# Multi-language
 SUPPORTED_LANGS = ["en", "es", "fr", "de", "it", "pt", "ar", "ru", "tr", "zh-Hans", "hi"]
-# Minimal localized labels; your long copy stays the same English text (kept),
-# but we localize buttons/system prompts so the bot is usable in any language.
 L = {
     "en": {
         "menu_plans": "View Plans",
@@ -116,9 +114,7 @@ L = {
         "stats_title": "*Estadísticas*",
         "pending_title": "*Carritos pendientes*",
     },
-    # Other languages fall back to English labels automatically
 }
-
 def tr(lang: str, key: str, **kwargs) -> str:
     base = L.get(lang, L["en"]).get(key) or L["en"].get(key, key)
     return base.format(**kwargs) if kwargs else base
@@ -134,58 +130,54 @@ logger = logging.getLogger("vip-bot")
 # =====================
 DATA_PATH = os.getenv("DATA_PATH", "data_store.json")
 STORE: Dict[str, Any] = {
-    "users": {},  # {user_id: {lang, last_plan, last_method, email, coupon, ref, awaiting_proof:bool}}
-    "leads": {},  # {user_id: {plan, method, started_at_iso, reminded_steps:[0,1,2], active:bool}}
-    "events": [], # list of dicts (ts, user_id, type, meta)
+    "users": {},
+    "leads": {},
+    "events": [],
 }
-
 def load_store():
     global STORE
     try:
         if os.path.exists(DATA_PATH):
             with open(DATA_PATH, "r", encoding="utf-8") as f:
                 STORE = json.load(f)
-                # Ensure keys exist
-                for k in ("users", "leads", "events"):
-                    STORE.setdefault(k, {} if k != "events" else [])
+            STORE.setdefault("users", {})
+            STORE.setdefault("leads", {})
+            STORE.setdefault("events", [])
         else:
             save_store()
     except Exception as e:
         logger.warning("Failed to load store: %s", e)
-
 def save_store():
     try:
         with open(DATA_PATH, "w", encoding="utf-8") as f:
             json.dump(STORE, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.warning("Failed to save store: %s", e)
-
 def user_lang(user_id: int, fallback: str = "en") -> str:
     return STORE["users"].get(str(user_id), {}).get("lang", fallback)
-
 def set_user_lang(user_id: int, lang: str):
     u = STORE["users"].setdefault(str(user_id), {})
     u["lang"] = lang
     save_store()
-
 def set_user_field(user_id: int, key: str, value: Any):
     u = STORE["users"].setdefault(str(user_id), {})
     u[key] = value
     save_store()
-
 def start_lead(user_id: int, plan: str, method: Optional[str] = None):
-    STORE["leads"][str(user_id)] = {
-        "plan": plan, "method": method, "started_at": datetime.now(timezone.utc).isoformat(),
-        "reminded": [], "active": True
-    }
+    lead = STORE["leads"].setdefault(str(user_id), {})
+    lead.update({
+        "plan": plan, "method": method,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "reminded": [], "active": True,
+        "snoozed_until": None,
+    })
     save_store()
-
 def close_lead(user_id: int):
     lead = STORE["leads"].get(str(user_id))
     if lead:
         lead["active"] = False
+        lead["snoozed_until"] = None
         save_store()
-
 def log_event(user_id: int, etype: str, meta: Dict[str, Any]):
     STORE["events"].append({
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -193,10 +185,30 @@ def log_event(user_id: int, etype: str, meta: Dict[str, Any]):
         "type": etype,
         "meta": meta,
     })
-    # limit events to avoid huge file
     if len(STORE["events"]) > 5000:
         STORE["events"] = STORE["events"][-3000:]
     save_store()
+
+# =====================
+# Helpers: URLs & buttons
+# =====================
+def _normalize_url(u: str) -> str:
+    u = (u or "").strip()
+    if not u:
+        return u
+    if not (u.startswith("http://") or u.startswith("https://")):
+        u = "https://" + u.lstrip("/")
+    return u
+
+def safe_button(label: str, url: str = "", as_webapp: bool = False) -> InlineKeyboardButton:
+    url = _normalize_url(url)
+    if not url:
+        return InlineKeyboardButton(label, callback_data="support")
+    # WebApps cannot be t.me/telegram links; must be https and embeddable
+    is_webapp_ok = url.startswith("https://") and ("t.me" not in url and "telegram.org" not in url)
+    if as_webapp and is_webapp_ok:
+        return InlineKeyboardButton(label, web_app=WebAppInfo(url=url))
+    return InlineKeyboardButton(label, url=url)
 
 # =====================
 # FastAPI + Telegram
@@ -207,7 +219,6 @@ START_TIME = datetime.now(timezone.utc)
 
 # Rate limit buckets (anti double-tap)
 RL_BUCKET: Dict[int, float] = {}
-
 def ratelimited(user_id: int, seconds: int = 1) -> bool:
     last = RL_BUCKET.get(user_id, 0.0)
     now = datetime.now().timestamp()
@@ -226,7 +237,6 @@ WELCOME_TEXT = (
     "⭐ *Don’t see the model you’re looking for? We’ll add them within 24–72 hours!*\n\n"
     "📌 Got questions ? VIP link not working ? Contact support 🔍👀"
 )
-
 SELECT_PLAN_TEXT = lambda plan_text: (
     f"⭐ You have chosen the **{plan_text}** plan.\n\n"
     "💳 **Apple Pay/Google Pay:** 🚀 Instant VIP access (link emailed immediately).\n"
@@ -234,7 +244,6 @@ SELECT_PLAN_TEXT = lambda plan_text: (
     "📧 **PayPal:**(30 - 60 min wait time), VIP link sent manually.\n\n"
     "🎉 Choose your preferred payment method below and get access today!"
 )
-
 SHOPIFY_TEXT = (
     "🚀 **Instant Access with Apple Pay/Google Pay!**\n\n"
     "🎁 **Choose Your VIP Plan:**\n"
@@ -243,7 +252,6 @@ SHOPIFY_TEXT = (
     "🛒 Click below to pay securely and get **INSTANT VIP access** delivered to your email! 📧\n\n"
     "✅ After payment, click 'I've Paid' to confirm."
 )
-
 CRYPTO_TEXT = (
     "⚡ **Pay Securely with Crypto!**\n\n"
     "🔗 Open the crypto payment mini‑app below inside Telegram.\n\n"
@@ -252,7 +260,6 @@ CRYPTO_TEXT = (
     "💎 Lifetime Access: **$27 USD** 🎉\n\n"
     "✅ Once you've sent the payment, click 'I've Paid' to confirm."
 )
-
 PAYPAL_TEXT = (
     "💸 **Easy Payment with PayPal!**\n\n"
     f"`{PAYMENT_INFO['paypal']}`\n\n"
@@ -261,7 +268,6 @@ PAYPAL_TEXT = (
     "💎 Lifetime Access: **£20.00 GBP** 🎉\n\n"
     "✅ Once payment is complete, click 'I've Paid' to confirm."
 )
-
 PAID_THANKS_TEXT = (
     "✅ **Payment Received! Thank You!** 🎉\n\n"
     "📸 Please send a **screenshot** or **transaction ID** to our support team for verification.\n"
@@ -270,7 +276,6 @@ PAID_THANKS_TEXT = (
     "🔗 If you paid via Apple Pay/Google Pay, check your email inbox for the VIP link.\n"
     "🔗 If you paid via PayPal or Crypto, your VIP link will be sent manually."
 )
-
 SUPPORT_PAGE_TEXT = (
     "💬 **Need Assistance? We're Here to Help!**\n\n"
     "🕒 **Working Hours:** 8:00 AM - 12:00 AM BST\n"
@@ -302,19 +307,27 @@ def payment_selector(plan: str, lang="en") -> InlineKeyboardMarkup:
         [InlineKeyboardButton(tr(lang, "back"), callback_data="back")],
     ])
 
+def add_coupon_to_url(url: str, code: Optional[str]) -> str:
+    if not code: return url
+    code = code.strip()
+    if not code: return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}discount={code}"
+
 def shopify_menu_webapp(lang="en", coupon: Optional[str] = None) -> InlineKeyboardMarkup:
     lt = add_coupon_to_url(PAYMENT_INFO["shopify"]["lifetime"], coupon)
     m1 = add_coupon_to_url(PAYMENT_INFO["shopify"]["1_month"], coupon)
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💎 Lifetime (£20.00)", web_app=WebAppInfo(url=lt))],
-        [InlineKeyboardButton("⏳ 1 Month (£10.00)", web_app=WebAppInfo(url=m1))],
+        [safe_button("💎 Lifetime (£20.00)", lt, as_webapp=True)],
+        [safe_button("⏳ 1 Month (£10.00)", m1, as_webapp=True)],
         [InlineKeyboardButton(tr(lang, "ive_paid"), callback_data="paid")],
         [InlineKeyboardButton(tr(lang, "back"), callback_data="back")],
     ])
 
-def crypto_menu_webapp(lang="en") -> InlineKeyboardMarkup:
+def crypto_menu(lang="en") -> InlineKeyboardMarkup:
+    link = PAYMENT_INFO["crypto"]["link"]
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(tr(lang, "open_crypto"), web_app=WebAppInfo(url=PAYMENT_INFO["crypto"]["link"]))],
+        [safe_button(tr(lang, "open_crypto"), link, as_webapp=True)],  # falls back to URL for t.me links
         [InlineKeyboardButton(tr(lang, "ive_paid"), callback_data="paid")],
         [InlineKeyboardButton(tr(lang, "back"), callback_data="back")],
     ])
@@ -329,60 +342,50 @@ def media_menu_webapps(lang="en") -> InlineKeyboardMarkup:
     rows = []
     for label, url in MEDIA_LINKS:
         if url.strip():
-            rows.append([InlineKeyboardButton(label, web_app=WebAppInfo(url=url))])
+            rows.append([safe_button(label, url, as_webapp=True)])
     rows.append([InlineKeyboardButton(tr(lang, "back"), callback_data="back")])
     return InlineKeyboardMarkup(rows)
 
 def language_menu() -> InlineKeyboardMarkup:
-    rows = []
-    for code in SUPPORTED_LANGS:
-        rows.append([InlineKeyboardButton(code, callback_data=f"lang_{code}")])
+    rows = [[InlineKeyboardButton(code, callback_data=f"lang_{code}")] for code in SUPPORTED_LANGS]
     rows.append([InlineKeyboardButton("Close", callback_data="back")])
     return InlineKeyboardMarkup(rows)
 
-# =====================
-# Coupons helpers
-# =====================
-def add_coupon_to_url(url: str, code: Optional[str]) -> str:
-    if not code:
-        return url
-    code = code.strip()
-    if not code:
-        return url
-    sep = "&" if "?" in url else "?"
-    # Shopify supports ?discount=CODE
-    return f"{url}{sep}discount={code}"
-
 def normalize_coupon(text: str) -> Optional[str]:
-    if not text:
-        return None
+    if not text: return None
     t = text.strip().upper()
     return t if t in COUPONS else None
 
 # =====================
 # Reminder scheduler
 # =====================
-REMINDER_TASKS: Dict[str, asyncio.Task] = {}
-
 async def reminder_loop(app: Application):
-    """Periodic scanner that schedules reminders for active leads."""
     while True:
         try:
             now = datetime.now(timezone.utc)
             for uid, lead in list(STORE["leads"].items()):
                 if not lead.get("active"):
                     continue
+                # snooze check
+                snoozed_until = lead.get("snoozed_until")
+                if snoozed_until:
+                    try:
+                        if now < datetime.fromisoformat(snoozed_until):
+                            continue
+                    except Exception:
+                        lead["snoozed_until"] = None
+                        save_store()
+
                 started = datetime.fromisoformat(lead["started_at"])
                 reminded = lead.get("reminded", [])
                 for idx, mins in enumerate(REMINDER_STEPS):
                     if idx in reminded:
                         continue
                     if now - started >= timedelta(minutes=mins):
-                        # schedule reminder
-                        asyncio.create_task(send_reminder(int(uid), idx))
+                        await send_reminder(int(uid), idx)
                         lead["reminded"].append(idx)
                         save_store()
-            await asyncio.sleep(30)  # light periodic check
+            await asyncio.sleep(30)
         except Exception as e:
             logger.warning("Reminder loop error: %s", e)
             await asyncio.sleep(5)
@@ -401,11 +404,8 @@ async def send_reminder(user_id: int, step_idx: int):
         logger.warning("Failed to send reminder to %s: %s", user_id, e)
 
 # =====================
-# FastAPI lifecycle
+# Lifecycle
 # =====================
-app = FastAPI()
-telegram_app: Optional[Application] = None
-
 @app.on_event("startup")
 async def startup_event():
     global telegram_app
@@ -434,8 +434,8 @@ async def startup_event():
     telegram_app.add_handler(CallbackQueryHandler(handle_back, pattern=r"^back$", block=False))
     telegram_app.add_handler(CallbackQueryHandler(handle_support, pattern=r"^support$", block=False))
     telegram_app.add_handler(CallbackQueryHandler(handle_media, pattern=r"^media$", block=False))
-    telegram_app.add_handler(CallbackQueryHandler(handle_lang_change, pattern=r"^lang_", block=False))
-    telegram_app.add_handler(CallbackQueryHandler(handle_resume, pattern=r"^(resume_checkout|snooze)$", block=False))
+    telegram_app.add_handler(CallbackQueryHandler(handle_lang_change, pattern=r"^(lang_menu|lang_)", block=False))
+    telegram_app.add_handler(CallbackQueryHandler(handle_resume_or_snooze, pattern=r"^(resume_checkout|snooze)$", block=False))
     telegram_app.add_handler(CallbackQueryHandler(handle_admin_approval, pattern=r"^(approve|needmore|reject)_.+$", block=False))
 
     # Proof intake (photos/docs/text) — auto-forward to admin
@@ -468,8 +468,6 @@ async def startup_event():
     # Start app + reminder loop
     await telegram_app.start()
     logger.info("Telegram bot started.")
-
-    # Kick off reminders loop
     asyncio.create_task(reminder_loop(telegram_app))
 
 @app.on_event("shutdown")
@@ -564,7 +562,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_event(user.id, "start", {"ref": ref, "lang": lang})
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = user_lang(update.effective_user.id)
     txt = (
         "*Commands*\n"
         "/start – Main menu\n"
@@ -627,10 +624,8 @@ async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, method, plan = q.data.split("_", 2)
     plan_text = "LIFETIME" if plan == "lifetime" else "1 MONTH"
 
-    # Persist context
     set_user_field(user.id, "last_plan", plan)
     set_user_field(user.id, "last_method", method)
-    # Update lead with method
     lead = STORE["leads"].setdefault(str(user.id), {"active": True})
     lead["method"] = method
     save_store()
@@ -638,7 +633,6 @@ async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["plan_text"] = plan_text
     context.user_data["method"] = method
 
-    # Coupon handling: prompt after picking Shopify method
     coupon = STORE["users"].get(str(user.id), {}).get("coupon")
 
     if method == "shopify":
@@ -646,7 +640,7 @@ async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = shopify_menu_webapp(lang, coupon=coupon)
     elif method == "crypto":
         msg = CRYPTO_TEXT
-        kb = crypto_menu_webapp(lang)
+        kb = crypto_menu(lang)  # SAFE: falls back for t.me links
     elif method == "paypal":
         msg = PAYPAL_TEXT
         kb = paypal_menu(lang)
@@ -666,8 +660,6 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     user = q.from_user
-    lang = user_lang(user.id)
-
     plan_text = context.user_data.get("plan_text", "N/A")
     method = context.user_data.get("method", "N/A")
     username = q.from_user.username or "No Username"
@@ -687,7 +679,7 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"💳 **Method:** {method.capitalize()}\n"
                     f"🕒 **Time:** {current_time}\n\n"
                     f"Approve? / Need more? / Reject?\n"
-                    f"(This is an automated ping — user will also be DM’d for proof.)"
+                    f"(Automated ping — user will also be DM’d for proof.)"
                 ),
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -742,13 +734,23 @@ async def handle_lang_change(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await q.edit_message_text(tr(code, "lang_changed"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(tr(code, "back"), callback_data="back")]]))
 
 # ---- Reminders: resume / snooze
-async def handle_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_resume_or_snooze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
     lang = user_lang(uid)
     lead = STORE["leads"].get(str(uid))
-    plan = lead["plan"] if lead else STORE["users"].get(str(uid), {}).get("last_plan", "1_month")
+    if q.data == "snooze":
+        # Snooze next reminders for 6 hours
+        until = datetime.now(timezone.utc) + timedelta(hours=6)
+        if lead:
+            lead["snoozed_until"] = until.isoformat()
+            save_store()
+        await q.edit_message_text("👌 Got it — I’ll remind you later. Come back anytime with /start.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(tr(lang, "back"), callback_data="back")]]))
+        log_event(uid, "snoozed", {"until": until.isoformat()})
+        return
+
+    plan = (lead or {}).get("plan") or STORE["users"].get(str(uid), {}).get("last_plan", "1_month")
     await q.edit_message_text(
         SELECT_PLAN_TEXT("LIFETIME" if plan == "lifetime" else "1 MONTH"),
         parse_mode=ParseMode.MARKDOWN,
@@ -778,7 +780,6 @@ async def handle_possible_proof(update: Update, context: ContextTypes.DEFAULT_TY
     username = f"@{user.username}" if user.username else f"ID:{user.id}"
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # Forward to admin
     if ADMIN_CHAT_ID:
         try:
             fwd = await update.effective_message.forward(chat_id=ADMIN_CHAT_ID)
@@ -802,15 +803,13 @@ async def handle_possible_proof(update: Update, context: ContextTypes.DEFAULT_TY
     log_event(user.id, "proof_sent", {"caption": caption[:200]})
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # coupon capture / email capture (basic)
     uid = update.effective_user.id
     text = (update.effective_message.text or "").strip()
 
-    # coupon?
     coupon = normalize_coupon(text)
     if coupon:
         set_user_field(uid, "coupon", coupon)
-        await update.effective_message.reply.text(tr(user_lang(uid), "coupon_ok", code=coupon, pct=COUPONS[coupon]))
+        await update.effective_message.reply_text(tr(user_lang(uid), "coupon_ok", code=coupon, pct=COUPONS[coupon]))
         return
 
     # basic email capture
@@ -819,8 +818,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(f"📧 Saved: *{text}*", parse_mode=ParseMode.MARKDOWN)
         return
 
-    # generic nudge
-    await update.effective_message.reply_text("Use /plans to see options or /support to contact us. 👍")
+    await update.effective_message.reply_text("Use /start to see options or contact support.")
 
 async def handle_admin_approval(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -856,7 +854,6 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg:
         await update.effective_message.reply_text("Usage: /broadcast Your message")
         return
-    # naive broadcast to all known users
     sent = 0
     for uid in list(STORE["users"].keys()):
         try:
@@ -887,17 +884,16 @@ async def admin_find(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("Usage: /find <user_id>")
         return
     key = context.args[0]
-    uid = key
-    if not uid.isdigit():
+    if not key.isdigit():
         await update.effective_message.reply_text("Please provide numeric user_id.")
         return
-    u = STORE["users"].get(uid)
-    l = STORE["leads"].get(uid)
+    u = STORE["users"].get(key)
+    l = STORE["leads"].get(key)
     if not u and not l:
         await update.effective_message.reply_text("No data for that user.")
         return
     await update.effective_message.reply_text(
-        f"*User* `{uid}`\n"
+        f"*User* `{key}`\n"
         f"Lang: {u.get('lang') if u else '-'}\n"
         f"Last plan: {u.get('last_plan') if u else '-'}\n"
         f"Last method: {u.get('last_method') if u else '-'}\n"
@@ -933,13 +929,3 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
     except Exception:
         pass
-
-# ==============
-# Language cmd
-# ==============
-@app.post("/setlang/{user_id}/{code}")
-async def http_setlang(user_id: int, code: str):
-    if code not in SUPPORTED_LANGS:
-        code = "en"
-    set_user_lang(user_id, code)
-    return {"ok": True, "lang": code}
