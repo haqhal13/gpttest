@@ -1,4 +1,7 @@
 # bot.py — VIP Bot (your copy + Mini Apps, multilingual, reminders, admin, coupons, referrals)
+# Ready for Render. Paste & deploy with:
+#   gunicorn bot:app --bind 0.0.0.0:$PORT --worker-class uvicorn.workers.UvicornWorker
+
 import os
 import json
 import logging
@@ -30,11 +33,11 @@ ADMIN_CHAT_ID_ENV = os.getenv("ADMIN_CHAT_ID", "7914196017")
 ADMIN_CHAT_ID: Optional[int] = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV.isdigit() else None
 ENV_NAME = os.getenv("ENV_NAME", "production")
 
-# Reminder cadence (minutes)
-REMINDERS_MINUTES = os.getenv("REMINDERS", "60,360,1440")  # 1h, 6h, 24h
+# Reminder cadence (minutes) — 1h and 24h only (as requested)
+REMINDERS_MINUTES = os.getenv("REMINDERS", "60,1440")  # 60 min, 1440 min
 REMINDER_STEPS = [int(x) for x in REMINDERS_MINUTES.split(",") if x.strip().isdigit()]
 
-# Coupons (format: "SPRING10=10,VIP5=5")
+# Coupons (format: "SPRING10=10,VIP5=5") — optional
 COUPONS_RAW = os.getenv("COUPONS", "")
 COUPONS: Dict[str, int] = {}
 for part in COUPONS_RAW.split(","):
@@ -65,7 +68,7 @@ MEDIA_LINKS = [
 ]
 HAS_MEDIA = any(url.strip() for _, url in MEDIA_LINKS)
 
-# Multi-language
+# Multi-language (labels/UI; long sales copy stays as your English text for consistency)
 SUPPORTED_LANGS = ["en", "es", "fr", "de", "it", "pt", "ar", "ru", "tr", "zh-Hans", "hi"]
 L = {
     "en": {
@@ -78,7 +81,6 @@ L = {
         "apple_google": "💳 Apple Pay/Google Pay 🚀 (Instant Access)",
         "crypto": "⚡ Crypto ⏳ (30 - 60 min wait time)",
         "paypal": "📧 PayPal 💌 (30 - 60 min wait time)",
-        "reminder_1": "⏰ Still interested? Resume your checkout in one tap:",
         "reminder_resume": "Resume checkout",
         "reminder_snooze": "Not now",
         "media_title": "🎬 Media Apps\n\nOpen inside Telegram.",
@@ -101,7 +103,6 @@ L = {
         "apple_google": "💳 Apple/Google Pay 🚀 (Acceso instantáneo)",
         "crypto": "⚡ Cripto ⏳ (30–60 min)",
         "paypal": "📧 PayPal 💌 (30–60 min)",
-        "reminder_1": "⏰ ¿Sigues interesado? Continúa tu compra:",
         "reminder_resume": "Reanudar compra",
         "reminder_snooze": "Ahora no",
         "media_title": "🎬 Apps de medios\n\nAbrir dentro de Telegram.",
@@ -130,9 +131,9 @@ logger = logging.getLogger("vip-bot")
 # =====================
 DATA_PATH = os.getenv("DATA_PATH", "data_store.json")
 STORE: Dict[str, Any] = {
-    "users": {},
-    "leads": {},
-    "events": [],
+    "users": {},   # {user_id: {lang, last_plan, last_method, email, coupon, ref, awaiting_proof:bool}}
+    "leads": {},   # {user_id: {plan, method, started_at, reminded:[idx...], active:bool, snoozed_until}}
+    "events": [],  # list of dicts (ts, user_id, type, meta)
 }
 def load_store():
     global STORE
@@ -327,7 +328,7 @@ def shopify_menu_webapp(lang="en", coupon: Optional[str] = None) -> InlineKeyboa
 def crypto_menu(lang="en") -> InlineKeyboardMarkup:
     link = PAYMENT_INFO["crypto"]["link"]
     return InlineKeyboardMarkup([
-        [safe_button(tr(lang, "open_crypto"), link, as_webapp=True)],  # falls back to URL for t.me links
+        [safe_button(tr(lang, "open_crypto"), link, as_webapp=True)],  # auto-fallback if link is t.me
         [InlineKeyboardButton(tr(lang, "ive_paid"), callback_data="paid")],
         [InlineKeyboardButton(tr(lang, "back"), callback_data="back")],
     ])
@@ -357,7 +358,7 @@ def normalize_coupon(text: str) -> Optional[str]:
     return t if t in COUPONS else None
 
 # =====================
-# Reminder scheduler
+# Reminder scheduler (1h & 24h DM nudges; persuasive copy)
 # =====================
 async def reminder_loop(app: Application):
     while True:
@@ -382,7 +383,7 @@ async def reminder_loop(app: Application):
                     if idx in reminded:
                         continue
                     if now - started >= timedelta(minutes=mins):
-                        await send_reminder(int(uid), idx)
+                        await send_reminder(int(uid), idx, lead)
                         lead["reminded"].append(idx)
                         save_store()
             await asyncio.sleep(30)
@@ -390,15 +391,33 @@ async def reminder_loop(app: Application):
             logger.warning("Reminder loop error: %s", e)
             await asyncio.sleep(5)
 
-async def send_reminder(user_id: int, step_idx: int):
+def _reminder_text(lang: str, step_idx: int, plan: str, method: Optional[str]) -> str:
+    # Persuasive, friendly, short. Step 0 = 1h, Step 1 = 24h
+    if step_idx == 0:
+        return (
+            "⏰ **Quick reminder**\n\n"
+            "Your VIP access is waiting — complete your checkout in one tap to secure today’s price. "
+            "Need help? Tap Support anytime."
+        )
+    else:
+        return (
+            "⛳ **Last chance today**\n\n"
+            "Spots are nearly gone and prices can change. Finish your payment now to lock in your VIP access. "
+            "If you need assistance, we're here."
+        )
+
+async def send_reminder(user_id: int, step_idx: int, lead: Dict[str, Any]):
     lang = user_lang(user_id)
     try:
-        text = tr(lang, "reminder_1")
+        plan = lead.get("plan", "1_month")
+        method = lead.get("method")
+        text = _reminder_text(lang, step_idx, plan, method)
+        # Build a single Resume button back to the plan's payment selector (keeps it simple & fast)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(tr(lang, "reminder_resume"), callback_data="resume_checkout")],
             [InlineKeyboardButton(tr(lang, "reminder_snooze"), callback_data="snooze")],
         ])
-        await telegram_app.bot.send_message(chat_id=user_id, text=text, reply_markup=kb)
+        await telegram_app.bot.send_message(chat_id=user_id, text=text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
         log_event(user_id, "reminder", {"step": step_idx})
     except Exception as e:
         logger.warning("Failed to send reminder to %s: %s", user_id, e)
@@ -541,7 +560,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = detect_lang(update)
     set_user_lang(user.id, lang)
 
-    # Sticky cart hint: if lead active, show reminder button
+    # Sticky cart hint: if lead active, show resume button
     lead = STORE["leads"].get(str(user.id))
     if lead and lead.get("active"):
         kb = InlineKeyboardMarkup([
