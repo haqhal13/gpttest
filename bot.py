@@ -836,104 +836,80 @@ def normalize_coupon(text: str) -> Optional[str]:
     t = text.strip().upper()
     return t if t in COUPONS else None
 
-# =====================
 # Reminder scheduler (1h & 24h) + 28-day membership expiry
-# =====================
-async def reminder_loop(app: Application):
-    while True:
-        try:
-            now = datetime.now(timezone.utc)
 
-            # Lead reminders
-            for uid, lead in list(STORE["leads"].items()):
-                if not lead.get("active"):
-                    continue
-                snoozed_until = lead.get("snoozed_until")
-                if snoozed_until:
-                    try:
-                        if now < datetime.fromisoformat(snoozed_until):
-                            continue
-                    except Exception:
-                        lead["snoozed_until"] = None
-                        save_store()
+import asyncio
+from datetime import datetime, timedelta
 
-                started = datetime.fromisoformat(lead["started_at"])
-                reminded = lead.get("reminded", [])
-                for idx, mins in enumerate(REMINDER_STEPS):
-                    if idx in reminded:
-                        continue
-                    if now - started >= timedelta(minutes=mins):
-                        await send_reminder(int(uid), idx, lead)
-                        lead["reminded"].append(idx)
-                        save_store()
+ADMIN_ID = 123456789  # replace with your Telegram user ID
 
-            # Membership expiry scan (day 28 for 1-month plan)
-            for uid, ms in list(STORE["memberships"].items()):
-                if not ms or ms.get("plan") != "1_month":
-                    continue
-                if ms.get("expiry_notified"):
-                    continue
-                try:
-                    activated = datetime.fromisoformat(ms["activated_at"])
-                except Exception:
-                    continue
-                if now - activated >= timedelta(days=28):
-                    await notify_membership_expiry(int(uid), ms)
-                    ms["expiry_notified"] = True
-                    save_store()
+# Store pending payments and active memberships
+pending_payments = {}  # user_id: time_of_order
+active_memberships = {}  # user_id: expiry_datetime
 
-            await asyncio.sleep(30)
-        except Exception as e:
-            logger.warning("Reminder loop error: %s", e)
-            await asyncio.sleep(5)
 
-async def send_reminder(user_id: int, step_idx: int, lead: Dict[str, Any]):
-    lang = user_lang(user_id)
-    try:
-        text = tx(lang, "reminder0" if step_idx == 0 else "reminder1")
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(tr(lang, "reminder_resume"), callback_data="resume_checkout")],
-            [InlineKeyboardButton(tr(lang, "reminder_snooze"), callback_data="snooze")],
-        ])
-        await telegram_app.bot.send_message(chat_id=user_id, text=text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
-        log_event(user_id, "reminder", {"step": step_idx})
-    except Exception as e:
-        logger.warning("Failed to send reminder to %s: %s", user_id, e)
+async def schedule_payment_reminders(context, user_id):
+    """Schedules 1h and 24h reminders for pending payments."""
+    now = datetime.utcnow()
+    pending_payments[user_id] = now
+    print(f"[Reminder] Payment tracking started for {user_id}")
 
-async def notify_membership_expiry(user_id: int, ms: Dict[str, Any]):
-    lang = user_lang(user_id)
-    renew_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔁 Renew 1 Month (£10.00)", callback_data="payment_shopify_1_month")],
-        [InlineKeyboardButton(tr(lang, "menu_support"), callback_data="support")],
-    ])
-    try:
-        await telegram_app.bot.send_message(
+    # Wait 1 hour
+    await asyncio.sleep(3600)
+    if user_id in pending_payments:
+        await context.bot.send_message(
             chat_id=user_id,
-            text=tx(lang, "membership_notice"),
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=renew_kb,
+            text="⏳ Hey! Just a reminder to complete your payment to access VIP 🚀"
         )
-    except Exception as e:
-        logger.warning("Could not DM expiry notice to user %s: %s", user_id, e)
 
-    # Admin ping
-    if ADMIN_CHAT_ID:
-        username = STORE["users"].get(str(user_id), {}).get("username", "No Username")
-        try:
-            await telegram_app.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text=(
-                    "🔔 *Membership Expiry Alert*\n\n"
-                    f"👤 **User:** @{username} (`{user_id}`)\n"
-                    f"📋 **Plan:** 1 Month\n"
-                    f"🗓 **Activated:** {ms.get('activated_at','?')}\n"
-                    "⏳ **Status:** Day 28 reached — renewal reminder sent."
-                ),
-                parse_mode=ParseMode.MARKDOWN,
-            )
-        except Exception as e:
-            logger.warning("Could not notify admin for user %s: %s", user_id, e)
+    # Wait until 24 hours from start
+    await asyncio.sleep(23 * 3600)
+    if user_id in pending_payments:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="⚠️ 24 hours have passed! Complete your payment now before the offer expires."
+        )
+        # Optional: Notify admin
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"User {user_id} still hasn’t paid after 24 hours."
+        )
 
+
+async def schedule_membership_expiry(context, user_id):
+    """Schedules a 28-day membership expiry notification."""
+    expiry_time = datetime.utcnow() + timedelta(days=28)
+    active_memberships[user_id] = expiry_time
+    print(f"[Expiry] Membership for {user_id} will expire on {expiry_time}")
+
+    # Wait 28 days
+    await asyncio.sleep(28 * 24 * 3600)
+    if user_id in active_memberships:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="⚠️ Your 1-month VIP access is about to expire. Renew now to keep your benefits!"
+        )
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"⚠️ User {user_id}'s membership is expiring today."
+        )
+        del active_memberships[user_id]
+
+
+# Example: Call these in your existing payment flow
+async def handle_order(update, context):
+    user_id = update.effective_user.id
+    # Your existing order logic here...
+    await schedule_payment_reminders(context, user_id)
+
+
+async def confirm_payment(update, context):
+    user_id = update.effective_user.id
+    # Your existing payment confirmation logic here...
+    if "1-month" in update.message.text.lower():
+        await schedule_membership_expiry(context, user_id)
+    if user_id in pending_payments:
+        del pending_payments[user_id]
 # =====================
 # Lifecycle
 # =====================
