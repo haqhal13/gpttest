@@ -1050,7 +1050,8 @@ async def webhook(
 # =====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if ratelimited(user.id): return
+    if ratelimited(user.id):
+        return
 
     # Persist username for admin notifications
     set_user_field(user.id, "username", user.username or "No Username")
@@ -1078,12 +1079,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = main_menu(lang)
 
     await update.effective_message.reply_text(
-        tx(lang, "welcome"),  # translated welcome (fallback to your original)
+        tx(lang, "welcome"),
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb,
         disable_web_page_preview=True,
     )
     log_event(user.id, "start", {"ref": ref, "lang": lang})
+
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
@@ -1096,6 +1098,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.effective_message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
 
+
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     up = datetime.now(timezone.utc) - START_TIME
     txt = (
@@ -1106,29 +1109,33 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.effective_message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
 
+
 async def terms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "*Terms & Notes*\n"
         "• Access is for personal use only; redistribution may lead to a ban\n"
-        "• Refunds assessed case‑by‑case if access was not delivered\n"
+        "• Refunds assessed case-by-case if access was not delivered\n"
         "• By purchasing, you accept these terms\n",
         parse_mode=ParseMode.MARKDOWN
     )
 
+
 async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(f"Your ID: `{update.effective_user.id}`", parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(
+        f"Your ID: `{update.effective_user.id}`",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 
 async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(
-        tr(user_lang(update.effective_user.id), "choose_language"),
-        reply_markup=language_menu()
-    )
-        except Exception:
+    try:
+        await update.effective_message.reply_text(
+            tr(user_lang(update.effective_user.id), "choose_language"),
+            reply_markup=language_menu()
+        )
+    except Exception:
         pass
-
-# -------------------------------
-# PAYMENT HANDLING (Example)
-# -------------------------------
+        
 async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mark user as paid and schedule membership expiry reminders."""
     user_id = update.effective_user.id
