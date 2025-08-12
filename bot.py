@@ -1,5 +1,5 @@
-# bot.py — VIP Bot (your copy + Mini Apps, multilingual, reminders, admin, coupons, referrals)
-# Ready for Render. Paste & deploy with:
+# bot.py — VIP Bot (keeps your texts/buttons; adds 1h/24h reminders + 28-day membership expiry ping to user & admin)
+# Run on Render with:
 #   gunicorn bot:app --bind 0.0.0.0:$PORT --worker-class uvicorn.workers.UvicornWorker
 
 import os
@@ -33,8 +33,8 @@ ADMIN_CHAT_ID_ENV = os.getenv("ADMIN_CHAT_ID", "7914196017")
 ADMIN_CHAT_ID: Optional[int] = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV.isdigit() else None
 ENV_NAME = os.getenv("ENV_NAME", "production")
 
-# Reminder cadence (minutes) — 1h and 24h only (as requested)
-REMINDERS_MINUTES = os.getenv("REMINDERS", "60,1440")  # 60 min, 1440 min
+# Reminder cadence (minutes) — 1h and 24h only
+REMINDERS_MINUTES = os.getenv("REMINDERS", "60,1440")
 REMINDER_STEPS = [int(x) for x in REMINDERS_MINUTES.split(",") if x.strip().isdigit()]
 
 # Coupons (format: "SPRING10=10,VIP5=5") — optional
@@ -46,7 +46,7 @@ for part in COUPONS_RAW.split(","):
         if v.strip().isdigit():
             COUPONS[k.strip().upper()] = int(v.strip())
 
-# Payment Information
+# Payment Information (as before)
 PAYMENT_INFO = {
     "shopify": {
         "1_month": os.getenv("PAY_1M", "https://nt9qev-td.myshopify.com/cart/55619895394678:1"),
@@ -68,7 +68,7 @@ MEDIA_LINKS = [
 ]
 HAS_MEDIA = any(url.strip() for _, url in MEDIA_LINKS)
 
-# Multi-language (labels/UI; long sales copy stays as your English text for consistency)
+# Multi-language (UI labels)
 SUPPORTED_LANGS = ["en", "es", "fr", "de", "it", "pt", "ar", "ru", "tr", "zh-Hans", "hi"]
 L = {
     "en": {
@@ -131,9 +131,10 @@ logger = logging.getLogger("vip-bot")
 # =====================
 DATA_PATH = os.getenv("DATA_PATH", "data_store.json")
 STORE: Dict[str, Any] = {
-    "users": {},   # {user_id: {lang, last_plan, last_method, email, coupon, ref, awaiting_proof:bool}}
-    "leads": {},   # {user_id: {plan, method, started_at, reminded:[idx...], active:bool, snoozed_until}}
-    "events": [],  # list of dicts (ts, user_id, type, meta)
+    "users": {},        # {user_id: {lang, last_plan, last_method, email, coupon, ref, awaiting_proof, username}}
+    "leads": {},        # {user_id: {plan, method, started_at, reminded:[idx...], active:bool, snoozed_until}}
+    "events": [],       # list of dicts (ts, user_id, type, meta)
+    "memberships": {},  # {user_id: {plan, activated_at, expiry_notified}}
 }
 def load_store():
     global STORE
@@ -144,6 +145,7 @@ def load_store():
             STORE.setdefault("users", {})
             STORE.setdefault("leads", {})
             STORE.setdefault("events", [])
+            STORE.setdefault("memberships", {})
         else:
             save_store()
     except Exception as e:
@@ -188,6 +190,16 @@ def log_event(user_id: int, etype: str, meta: Dict[str, Any]):
     })
     if len(STORE["events"]) > 5000:
         STORE["events"] = STORE["events"][-3000:]
+    save_store()
+
+# --- Membership helpers
+def activate_membership(user_id: int, plan: str):
+    """Mark a user as active member for a given plan."""
+    STORE["memberships"][str(user_id)] = {
+        "plan": plan,  # "1_month" | "lifetime"
+        "activated_at": datetime.now(timezone.utc).isoformat(),
+        "expiry_notified": False,
+    }
     save_store()
 
 # =====================
@@ -328,7 +340,7 @@ def shopify_menu_webapp(lang="en", coupon: Optional[str] = None) -> InlineKeyboa
 def crypto_menu(lang="en") -> InlineKeyboardMarkup:
     link = PAYMENT_INFO["crypto"]["link"]
     return InlineKeyboardMarkup([
-        [safe_button(tr(lang, "open_crypto"), link, as_webapp=True)],  # auto-fallback if link is t.me
+        [safe_button(tr(lang, "open_crypto"), link, as_webapp=True)],  # fallback to URL for t.me links
         [InlineKeyboardButton(tr(lang, "ive_paid"), callback_data="paid")],
         [InlineKeyboardButton(tr(lang, "back"), callback_data="back")],
     ])
@@ -358,12 +370,14 @@ def normalize_coupon(text: str) -> Optional[str]:
     return t if t in COUPONS else None
 
 # =====================
-# Reminder scheduler (1h & 24h DM nudges; persuasive copy)
+# Reminder scheduler (1h & 24h) + 28-day membership expiry
 # =====================
 async def reminder_loop(app: Application):
     while True:
         try:
             now = datetime.now(timezone.utc)
+
+            # --- Lead reminders (1h, 24h)
             for uid, lead in list(STORE["leads"].items()):
                 if not lead.get("active"):
                     continue
@@ -386,13 +400,30 @@ async def reminder_loop(app: Application):
                         await send_reminder(int(uid), idx, lead)
                         lead["reminded"].append(idx)
                         save_store()
+
+            # --- Membership expiry scan (day 28 for 1-month plan)
+            for uid, ms in list(STORE["memberships"].items()):
+                if not ms or ms.get("plan") != "1_month":
+                    continue
+                if ms.get("expiry_notified"):
+                    continue
+                try:
+                    activated = datetime.fromisoformat(ms["activated_at"])
+                except Exception:
+                    # bad timestamp; skip
+                    continue
+
+                if now - activated >= timedelta(days=28):
+                    await notify_membership_expiry(int(uid), ms)
+                    ms["expiry_notified"] = True
+                    save_store()
+
             await asyncio.sleep(30)
         except Exception as e:
             logger.warning("Reminder loop error: %s", e)
             await asyncio.sleep(5)
 
 def _reminder_text(lang: str, step_idx: int, plan: str, method: Optional[str]) -> str:
-    # Persuasive, friendly, short. Step 0 = 1h, Step 1 = 24h
     if step_idx == 0:
         return (
             "⏰ **Quick reminder**\n\n"
@@ -412,7 +443,6 @@ async def send_reminder(user_id: int, step_idx: int, lead: Dict[str, Any]):
         plan = lead.get("plan", "1_month")
         method = lead.get("method")
         text = _reminder_text(lang, step_idx, plan, method)
-        # Build a single Resume button back to the plan's payment selector (keeps it simple & fast)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(tr(lang, "reminder_resume"), callback_data="resume_checkout")],
             [InlineKeyboardButton(tr(lang, "reminder_snooze"), callback_data="snooze")],
@@ -421,6 +451,46 @@ async def send_reminder(user_id: int, step_idx: int, lead: Dict[str, Any]):
         log_event(user_id, "reminder", {"step": step_idx})
     except Exception as e:
         logger.warning("Failed to send reminder to %s: %s", user_id, e)
+
+async def notify_membership_expiry(user_id: int, ms: Dict[str, Any]):
+    """DM user + ping admin that a 1-month membership is at 28 days (renewal prompt)."""
+    lang = user_lang(user_id)
+    # User reminder with Renew button
+    renew_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔁 Renew 1 Month (£10.00)", callback_data="payment_shopify_1_month")],
+        [InlineKeyboardButton("💬 Support", callback_data="support")],
+    ])
+    try:
+        await telegram_app.bot.send_message(
+            chat_id=user_id,
+            text=(
+                "⏳ *Membership notice*\n\n"
+                "Your *1‑Month VIP access* is reaching *28 days*. To avoid interruption, "
+                "renew now in one tap."
+            ),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=renew_kb,
+        )
+    except Exception as e:
+        logger.warning("Could not DM expiry notice to user %s: %s", user_id, e)
+
+    # Admin ping (detailed)
+    if ADMIN_CHAT_ID:
+        username = STORE["users"].get(str(user_id), {}).get("username", "No Username")
+        try:
+            await telegram_app.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    "🔔 *Membership Expiry Alert*\n\n"
+                    f"👤 **User:** @{username} (`{user_id}`)\n"
+                    f"📋 **Plan:** 1 Month\n"
+                    f"🗓 **Activated:** {ms.get('activated_at','?')}\n"
+                    "⏳ **Status:** Day 28 reached — renewal reminder sent."
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as e:
+            logger.warning("Could not notify admin for user %s: %s", user_id, e)
 
 # =====================
 # Lifecycle
@@ -550,13 +620,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if ratelimited(user.id): return
 
+    # Persist username for admin notifications
+    set_user_field(user.id, "username", user.username or "No Username")
+
     # Referral tracking from /start args
     ref = None
     if context.args:
         ref = context.args[0][:32]
         set_user_field(user.id, "ref", ref)
 
-    # Set / remember language
+    # Language
     lang = detect_lang(update)
     set_user_lang(user.id, lang)
 
@@ -659,7 +732,7 @@ async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = shopify_menu_webapp(lang, coupon=coupon)
     elif method == "crypto":
         msg = CRYPTO_TEXT
-        kb = crypto_menu(lang)  # SAFE: falls back for t.me links
+        kb = crypto_menu(lang)
     elif method == "paypal":
         msg = PAYPAL_TEXT
         kb = paypal_menu(lang)
@@ -684,8 +757,13 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = q.from_user.username or "No Username"
     current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # Close the lead (stop reminders)
+    # Close the lead (stop 1h/24h reminders)
     close_lead(user.id)
+
+    # Activate membership if it's a 1-month plan
+    plan_key = STORE["users"].get(str(user.id), {}).get("last_plan")
+    if plan_key == "1_month":
+        activate_membership(user.id, plan_key)
 
     if ADMIN_CHAT_ID:
         try:
@@ -913,6 +991,7 @@ async def admin_find(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.effective_message.reply_text(
         f"*User* `{key}`\n"
+        f"Username: {u.get('username') if u else '-'}\n"
         f"Lang: {u.get('lang') if u else '-'}\n"
         f"Last plan: {u.get('last_plan') if u else '-'}\n"
         f"Last method: {u.get('last_method') if u else '-'}\n"
