@@ -1,4 +1,4 @@
-# bot.py — VIP Bot (keeps your texts/buttons; adds 1h/24h reminders + 28-day membership expiry ping to user & admin)
+# bot.py — VIP Bot (keeps your texts/buttons; adds multilingual + flags, 1h/24h reminders, 28-day membership expiry pings)
 # Run on Render with:
 #   gunicorn bot:app --bind 0.0.0.0:$PORT --worker-class uvicorn.workers.UvicornWorker
 
@@ -68,8 +68,16 @@ MEDIA_LINKS = [
 ]
 HAS_MEDIA = any(url.strip() for _, url in MEDIA_LINKS)
 
-# Multi-language (UI labels)
+# =====================
+# Multi-language (UI labels + main copies)
+# =====================
 SUPPORTED_LANGS = ["en", "es", "fr", "de", "it", "pt", "ar", "ru", "tr", "zh-Hans", "hi"]
+FLAGS = {
+    "en": "🇬🇧", "es": "🇪🇸", "fr": "🇫🇷", "de": "🇩🇪", "it": "🇮🇹",
+    "pt": "🇵🇹", "ar": "🇸🇦", "ru": "🇷🇺", "tr": "🇹🇷", "zh-Hans": "🇨🇳", "hi": "🇮🇳"
+}
+
+# UI labels (short)
 L = {
     "en": {
         "menu_plans": "View Plans",
@@ -92,6 +100,8 @@ L = {
         "status_title": "*Status*",
         "stats_title": "*Stats*",
         "pending_title": "*Pending checkouts*",
+        "change_language": "🌐 Change language",
+        "resume": "🧾 Resume checkout",
     },
     "es": {
         "menu_plans": "Ver planes",
@@ -114,10 +124,335 @@ L = {
         "status_title": "*Estado*",
         "stats_title": "*Estadísticas*",
         "pending_title": "*Carritos pendientes*",
+        "change_language": "🌐 Cambiar idioma",
+        "resume": "🧾 Reanudar",
+    },
+    "fr": {
+        "menu_plans": "Voir les offres",
+        "menu_media": "Apps média",
+        "menu_support": "Support",
+        "back": "🔙 Retour",
+        "ive_paid": "✅ J'ai payé",
+        "open_crypto": "Ouvrir le lien crypto",
+        "apple_google": "💳 Apple/Google Pay 🚀 (Accès instantané)",
+        "crypto": "⚡ Crypto ⏳ (30–60 min)",
+        "paypal": "📧 PayPal 💌 (30–60 min)",
+        "reminder_resume": "Reprendre le paiement",
+        "reminder_snooze": "Plus tard",
+        "media_title": "🎬 Apps média\n\nOuvrir dans Telegram.",
+        "lang_changed": "🌐 Langue mise à jour.",
+        "choose_language": "🌐 Choisissez votre langue :",
+        "coupon_ok": "🎟️ Code appliqué : {code} (-{pct}%).",
+        "coupon_bad": "❌ Code invalide.",
+        "enter_coupon": "Envoyez votre code maintenant (ou /skip).",
+        "status_title": "*Statut*",
+        "stats_title": "*Stats*",
+        "pending_title": "*Paniers en attente*",
+        "change_language": "🌐 Changer de langue",
+        "resume": "🧾 Reprendre",
+    },
+    "de": {
+        "menu_plans": "Angebote ansehen",
+        "menu_media": "Media-Apps",
+        "menu_support": "Support",
+        "back": "🔙 Zurück",
+        "ive_paid": "✅ Ich habe bezahlt",
+        "open_crypto": "Krypto-Link öffnen",
+        "apple_google": "💳 Apple/Google Pay 🚀 (Sofortzugang)",
+        "crypto": "⚡ Krypto ⏳ (30–60 Min.)",
+        "paypal": "📧 PayPal 💌 (30–60 Min.)",
+        "reminder_resume": "Kauf fortsetzen",
+        "reminder_snooze": "Nicht jetzt",
+        "media_title": "🎬 Media-Apps\n\nIn Telegram öffnen.",
+        "lang_changed": "🌐 Sprache aktualisiert.",
+        "choose_language": "🌐 Sprache wählen:",
+        "coupon_ok": "🎟️ Gutschein angewandt: {code} (-{pct}%).",
+        "coupon_bad": "❌ Ungültiger Gutschein.",
+        "enter_coupon": "Gutscheincode senden (oder /skip).",
+        "status_title": "*Status*",
+        "stats_title": "*Statistiken*",
+        "pending_title": "*Offene Warenkörbe*",
+        "change_language": "🌐 Sprache ändern",
+        "resume": "🧾 Fortsetzen",
+    },
+    "it": {
+        "menu_plans": "Vedi piani",
+        "menu_media": "App media",
+        "menu_support": "Supporto",
+        "back": "🔙 Indietro",
+        "ive_paid": "✅ Ho pagato",
+        "open_crypto": "Apri link crypto",
+        "apple_google": "💳 Apple/Google Pay 🚀 (Accesso immediato)",
+        "crypto": "⚡ Cripto ⏳ (30–60 min)",
+        "paypal": "📧 PayPal 💌 (30–60 min)",
+        "reminder_resume": "Riprendi pagamento",
+        "reminder_snooze": "Non ora",
+        "media_title": "🎬 App media\n\nApri in Telegram.",
+        "lang_changed": "🌐 Lingua aggiornata.",
+        "choose_language": "🌐 Scegli la lingua:",
+        "coupon_ok": "🎟️ Coupon applicato: {code} (-{pct}%).",
+        "coupon_bad": "❌ Coupon non valido.",
+        "enter_coupon": "Invia il coupon ora (o /skip).",
+        "status_title": "*Stato*",
+        "stats_title": "*Statistiche*",
+        "pending_title": "*Carrelli in sospeso*",
+        "change_language": "🌐 Cambia lingua",
+        "resume": "🧾 Riprendi",
+    },
+    "pt": {
+        "menu_plans": "Ver planos",
+        "menu_media": "Apps de mídia",
+        "menu_support": "Suporte",
+        "back": "🔙 Voltar",
+        "ive_paid": "✅ Paguei",
+        "open_crypto": "Abrir link de cripto",
+        "apple_google": "💳 Apple/Google Pay 🚀 (Acesso instantâneo)",
+        "crypto": "⚡ Cripto ⏳ (30–60 min)",
+        "paypal": "📧 PayPal 💌 (30–60 min)",
+        "reminder_resume": "Retomar pagamento",
+        "reminder_snooze": "Agora não",
+        "media_title": "🎬 Apps de mídia\n\nAbrir no Telegram.",
+        "lang_changed": "🌐 Idioma atualizado.",
+        "choose_language": "🌐 Escolha seu idioma:",
+        "coupon_ok": "🎟️ Cupom aplicado: {code} (-{pct}%).",
+        "coupon_bad": "❌ Cupom inválido.",
+        "enter_coupon": "Envie seu cupom agora (ou /skip).",
+        "status_title": "*Status*",
+        "stats_title": "*Estatísticas*",
+        "pending_title": "*Carrinhos pendentes*",
+        "change_language": "🌐 Alterar idioma",
+        "resume": "🧾 Retomar",
+    },
+    "tr": {
+        "menu_plans": "Planları Gör",
+        "menu_media": "Medya Uygulamaları",
+        "menu_support": "Destek",
+        "back": "🔙 Geri",
+        "ive_paid": "✅ Ödeme yaptım",
+        "open_crypto": "Kripto bağlantısını aç",
+        "apple_google": "💳 Apple/Google Pay 🚀 (Anında erişim)",
+        "crypto": "⚡ Kripto ⏳ (30–60 dk)",
+        "paypal": "📧 PayPal 💌 (30–60 dk)",
+        "reminder_resume": "Ödemeye devam et",
+        "reminder_snooze": "Şimdi değil",
+        "media_title": "🎬 Medya Uygulamaları\n\nTelegram içinde açın.",
+        "lang_changed": "🌐 Dil güncellendi.",
+        "choose_language": "🌐 Dil seçin:",
+        "coupon_ok": "🎟️ Kupon uygulandı: {code} (-{pct}%).",
+        "coupon_bad": "❌ Geçersiz kupon.",
+        "enter_coupon": "Kuponunuzu gönderin (veya /skip).",
+        "status_title": "*Durum*",
+        "stats_title": "*İstatistikler*",
+        "pending_title": "*Bekleyen sepetler*",
+        "change_language": "🌐 Dili değiştir",
+        "resume": "🧾 Devam et",
+    },
+    "ru": {
+        "menu_plans": "Тарифы",
+        "menu_media": "Медиа‑приложения",
+        "menu_support": "Поддержка",
+        "back": "🔙 Назад",
+        "ive_paid": "✅ Я оплатил",
+        "open_crypto": "Открыть крипто‑ссылку",
+        "apple_google": "💳 Apple/Google Pay 🚀 (Мгновенный доступ)",
+        "crypto": "⚡ Крипто ⏳ (30–60 мин.)",
+        "paypal": "📧 PayPal 💌 (30–60 мин.)",
+        "reminder_resume": "Продолжить оплату",
+        "reminder_snooze": "Не сейчас",
+        "media_title": "🎬 Медиа‑приложения\n\nОткрывается в Telegram.",
+        "lang_changed": "🌐 Язык обновлён.",
+        "choose_language": "🌐 Выберите язык:",
+        "coupon_ok": "🎟️ Купон применён: {code} (-{pct}%).",
+        "coupon_bad": "❌ Неверный купон.",
+        "enter_coupon": "Отправьте купон (или /skip).",
+        "status_title": "*Статус*",
+        "stats_title": "*Статистика*",
+        "pending_title": "*Брошенные корзины*",
+        "change_language": "🌐 Сменить язык",
+        "resume": "🧾 Продолжить",
+    },
+    "ar": {  # RTL — Telegram handles layout
+        "menu_plans": "عرض الباقات",
+        "menu_media": "تطبيقات الوسائط",
+        "menu_support": "الدعم",
+        "back": "🔙 رجوع",
+        "ive_paid": "✅ دفعت",
+        "open_crypto": "فتح رابط العملات",
+        "apple_google": "💳 Apple/Google Pay 🚀 (وصول فوري)",
+        "crypto": "⚡ عملات رقمية ⏳ (30–60 دقيقة)",
+        "paypal": "📧 باي بال 💌 (30–60 دقيقة)",
+        "reminder_resume": "متابعة الدفع",
+        "reminder_snooze": "لاحقاً",
+        "media_title": "🎬 تطبيقات الوسائط\n\nتفتح داخل تيليجرام.",
+        "lang_changed": "🌐 تم تحديث اللغة.",
+        "choose_language": "🌐 اختر لغتك:",
+        "coupon_ok": "🎟️ تم تطبيق القسيمة: {code} (-{pct}%).",
+        "coupon_bad": "❌ قسيمة غير صالحة.",
+        "enter_coupon": "أرسل القسيمة الآن (أو /skip).",
+        "status_title": "*الحالة*",
+        "stats_title": "*إحصائيات*",
+        "pending_title": "*سلال معلّقة*",
+        "change_language": "🌐 تغيير اللغة",
+        "resume": "🧾 متابعة",
+    },
+    "hi": {
+        "menu_plans": "प्लान देखें",
+        "menu_media": "मीडिया ऐप्स",
+        "menu_support": "सपोर्ट",
+        "back": "🔙 वापस",
+        "ive_paid": "✅ मैंने भुगतान किया",
+        "open_crypto": "क्रिप्टो लिंक खोलें",
+        "apple_google": "💳 Apple/Google Pay 🚀 (तुरंत एक्सेस)",
+        "crypto": "⚡ क्रिप्टो ⏳ (30–60 मिनट)",
+        "paypal": "📧 पेपाल 💌 (30–60 मिनट)",
+        "reminder_resume": "पेमेंट जारी रखें",
+        "reminder_snooze": "अभी नहीं",
+        "media_title": "🎬 मीडिया ऐप्स\n\nटेलीग्राम में खोलें।",
+        "lang_changed": "🌐 भाषा अपडेट हुई।",
+        "choose_language": "🌐 अपनी भाषा चुनें:",
+        "coupon_ok": "🎟️ कूपन लागू: {code} (-{pct}%).",
+        "coupon_bad": "❌ अमान्य कूपन।",
+        "enter_coupon": "अपना कूपन भेजें (या /skip).",
+        "status_title": "*स्थिति*",
+        "stats_title": "*आंकड़े*",
+        "pending_title": "*लंबित कार्ट*",
+        "change_language": "🌐 भाषा बदलें",
+        "resume": "🧾 जारी रखें",
+    },
+    "zh-Hans": {
+        "menu_plans": "查看套餐",
+        "menu_media": "媒体应用",
+        "menu_support": "客服",
+        "back": "🔙 返回",
+        "ive_paid": "✅ 我已付款",
+        "open_crypto": "打开加密货币链接",
+        "apple_google": "💳 Apple/Google Pay 🚀（即时访问）",
+        "crypto": "⚡ 加密货币 ⏳（30–60 分钟）",
+        "paypal": "📧 PayPal 💌（30–60 分钟）",
+        "reminder_resume": "继续结账",
+        "reminder_snooze": "稍后",
+        "media_title": "🎬 媒体应用\n\n在 Telegram 内打开。",
+        "lang_changed": "🌐 语言已更新。",
+        "choose_language": "🌐 选择语言：",
+        "coupon_ok": "🎟️ 已应用优惠码：{code}（-{pct}%）。",
+        "coupon_bad": "❌ 优惠码无效。",
+        "enter_coupon": "现在发送优惠码（或 /skip）。",
+        "status_title": "*状态*",
+        "stats_title": "*统计*",
+        "pending_title": "*未完成结账*",
+        "change_language": "🌐 更改语言",
+        "resume": "🧾 继续",
     },
 }
+
+# Main sales copies per language (fallback to English originals)
+TEXTS = {
+    "en": {
+        "welcome": (
+            "💎 **Welcome to the VIP Bot!**\n\n"
+            "💎 *Get access to thousands of creators every month!*\n"
+            "⚡ *Instant access to the VIP link sent directly to your email!*\n"
+            "⭐ *Don’t see the model you’re looking for? We’ll add them within 24–72 hours!*\n\n"
+            "📌 Got questions ? VIP link not working ? Contact support 🔍👀"
+        ),
+        "select_plan": (
+            "⭐ You have chosen the **{plan_text}** plan.\n\n"
+            "💳 **Apple Pay/Google Pay:** 🚀 Instant VIP access (link emailed immediately).\n"
+            "⚡ **Crypto:** (30 - 60 min wait time), VIP link sent manually.\n"
+            "📧 **PayPal:**(30 - 60 min wait time), VIP link sent manually.\n\n"
+            "🎉 Choose your preferred payment method below and get access today!"
+        ),
+        "shopify": (
+            "🚀 **Instant Access with Apple Pay/Google Pay!**\n\n"
+            "🎁 **Choose Your VIP Plan:**\n"
+            "💎 Lifetime Access: **£20.00 GBP** 🎉\n"
+            "⏳ 1 Month Access: **£10.00 GBP** 🌟\n\n"
+            "🛒 Click below to pay securely and get **INSTANT VIP access** delivered to your email! 📧\n\n"
+            "✅ After payment, click 'I've Paid' to confirm."
+        ),
+        "crypto": (
+            "⚡ **Pay Securely with Crypto!**\n\n"
+            "🔗 Open the crypto payment mini‑app below inside Telegram.\n\n"
+            "💎 **Choose Your Plan:**\n"
+            "⏳ 1 Month Access: **$13.00 USD** 🌟\n"
+            "💎 Lifetime Access: **$27 USD** 🎉\n\n"
+            "✅ Once you've sent the payment, click 'I've Paid' to confirm."
+        ),
+        "paypal": (
+            "💸 **Easy Payment with PayPal!**\n\n"
+            f"`{PAYMENT_INFO['paypal']}`\n\n"
+            "💎 **Choose Your Plan:**\n"
+            "⏳ 1 Month Access: **£10.00 GBP** 🌟\n"
+            "💎 Lifetime Access: **£20.00 GBP** 🎉\n\n"
+            "✅ Once payment is complete, click 'I've Paid' to confirm."
+        ),
+        "paid_thanks": (
+            "✅ **Payment Received! Thank You!** 🎉\n\n"
+            "📸 Please send a **screenshot** or **transaction ID** to our support team for verification.\n"
+            f"👉 {SUPPORT_CONTACT}\n\n"
+            "⚡ **Important Notice:**\n"
+            "🔗 If you paid via Apple Pay/Google Pay, check your email inbox for the VIP link.\n"
+            "🔗 If you paid via PayPal or Crypto, your VIP link will be sent manually."
+        ),
+        "support_page": (
+            "💬 **Need Assistance? We're Here to Help!**\n\n"
+            "🕒 **Working Hours:** 8:00 AM - 12:00 AM BST\n"
+            f"📨 For support, contact us directly at:\n"
+            f"👉 {SUPPORT_CONTACT}\n\n"
+            "⚡ Our team is ready to assist you as quickly as possible. "
+            "Thank you for choosing VIP Bot! 💎"
+        ),
+        "reminder0": (
+            "⏰ **Quick reminder**\n\n"
+            "Your VIP access is waiting — complete your checkout in one tap to secure today’s price. "
+            "Need help? Tap Support anytime."
+        ),
+        "reminder1": (
+            "⛳ **Last chance today**\n\n"
+            "Spots are nearly gone and prices can change. Finish your payment now to lock in your VIP access. "
+            "If you need assistance, we're here."
+        ),
+        "membership_notice": (
+            "⏳ *Membership notice*\n\n"
+            "Your *1‑Month VIP access* is reaching *28 days*. To avoid interruption, "
+            "renew now in one tap."
+        ),
+    },
+    # --- Translations (short & clean)
+    "es": {
+        "welcome": "💎 **¡Bienvenido al VIP Bot!**\n\n💎 *Acceso a miles de creadores cada mes.*\n⚡ *Enlace VIP enviado al correo al instante.*\n⭐ *¿No ves el modelo que buscas? Lo añadimos en 24–72h.*\n\n📌 ¿Dudas? ¿Enlace no funciona? Soporte 🔍👀",
+        "select_plan": "⭐ Has elegido el plan **{plan_text}**.\n\n💳 **Apple/Google Pay:** 🚀 Acceso instantáneo (enlace por email).\n⚡ **Cripto:** (30–60 min) enlace manual.\n📧 **PayPal:** (30–60 min) enlace manual.\n\n🎉 ¡Elige un método y accede hoy!",
+        "shopify": "🚀 **Acceso instantáneo con Apple/Google Pay!**\n\n🎁 **Elige tu plan:**\n💎 Lifetime: **£20.00** 🎉\n⏳ 1 mes: **£10.00** 🌟\n\n🛒 Paga seguro y recibe **acceso INSTANTÁNEO** por email.\n\n✅ Luego toca 'Ya pagué'.",
+        "crypto": "⚡ **Paga con Cripto**\n\n🔗 Abre la mini‑app de pago abajo.\n\n💎 **Planes:**\n⏳ 1 mes: **$13** 🌟\n💎 Lifetime: **$27** 🎉\n\n✅ Tras enviar, toca 'Ya pagué'.",
+        "paypal": f"💸 **PayPal fácil**\n\n`{PAYMENT_INFO['paypal']}`\n\n💎 1 mes: **£10.00** 🌟\n💎 Lifetime: **£20.00** 🎉\n\n✅ Tras pagar, toca 'Ya pagué'.",
+        "paid_thanks": f"✅ **¡Pago recibido!** 🎉\n\n📸 Envía **captura** o **ID de transacción** a soporte.\n👉 {SUPPORT_CONTACT}\n\n⚡ **Aviso:**\n🔗 Apple/Google Pay → revisa tu email.\n🔗 PayPal/Cripto → enlace manual.",
+        "support_page": f"💬 **¿Necesitas ayuda?**\n\n🕒 *Horario:* 8:00–24:00 BST\n📨 Contacto:\n👉 {SUPPORT_CONTACT}\n\n⚡ ¡Respondemos rápido! Gracias por elegir VIP Bot. 💎",
+        "reminder0": "⏰ **Recordatorio rápido**\n\nTu acceso VIP te espera. Finaliza el pago en un toque. ¿Dudas? Soporte.",
+        "reminder1": "⛳ **Última oportunidad hoy**\n\nQuedan pocas plazas. Termina el pago y asegura tu acceso.",
+        "membership_notice": "⏳ *Aviso de membresía*\n\nTu *VIP 1 mes* llega a *28 días*. Renueva ahora para evitar cortes.",
+    },
+    "fr": {
+        "welcome": "💎 **Bienvenue sur le VIP Bot !**\n\n💎 *Accédez à des milliers de créateurs chaque mois.*\n⚡ *Lien VIP envoyé par email instantanément.*\n⭐ *Modèle manquant ? Ajout sous 24–72h.*\n\n📌 Questions ? Lien KO ? Support 🔍👀",
+        "select_plan": "⭐ Vous avez choisi **{plan_text}**.\n\n💳 **Apple/Google Pay :** 🚀 Accès instantané (email).\n⚡ **Crypto :** (30–60 min) envoi manuel.\n📧 **PayPal :** (30–60 min) envoi manuel.\n\n🎉 Choisissez un moyen de paiement ci‑dessous !",
+        "shopify": "🚀 **Accès instantané avec Apple/Google Pay !**\n\n🎁 **Choisissez votre plan :**\n💎 Lifetime : **£20.00** 🎉\n⏳ 1 mois : **£10.00** 🌟\n\n🛒 Payez en toute sécurité et recevez **l’accès INSTANTANÉ** par email.\n\n✅ Ensuite, touchez « J’ai payé ».",
+        "crypto": "⚡ **Payer en Crypto**\n\n🔗 Ouvrez la mini‑app ci‑dessous.\n\n💎 **Plans :** 1 mois **$13**, Lifetime **$27**.\n\n✅ Après envoi, touchez « J’ai payé ».",
+        "paypal": f"💸 **PayPal**\n\n`{PAYMENT_INFO['paypal']}`\n\n💎 1 mois: **£10.00** 🌟\n💎 Lifetime: **£20.00** 🎉\n\n✅ Après paiement, touchez « J’ai payé ».",
+        "paid_thanks": f"✅ **Paiement reçu !** 🎉\n\n📸 Envoyez une **capture** ou **ID de transaction** au support.\n👉 {SUPPORT_CONTACT}\n\n⚡ **Note :** Apple/Google Pay → email. PayPal/Crypto → envoi manuel.",
+        "support_page": f"💬 **Besoin d’aide ?**\n\n🕒 8:00–24:00 BST\n📨 Contact : {SUPPORT_CONTACT}\n\n⚡ Réponse rapide. Merci d’utiliser VIP Bot ! 💎",
+        "reminder0": "⏰ **Petit rappel**\n\nVotre accès VIP vous attend. Finalisez en un clic. Support dispo.",
+        "reminder1": "⛳ **Dernière chance aujourd’hui**\n\nPeu de places. Validez pour verrouiller votre accès.",
+        "membership_notice": "⏳ *Alerte abonnement*\n\nVotre *VIP 1 mois* atteint *28 jours*. Renouvelez maintenant.",
+    },
+    # (de,it,pt,tr,ru,ar,hi,zh-Hans) already covered in labels; messages could be extended similarly if you want fuller translations later
+}
+
 def tr(lang: str, key: str, **kwargs) -> str:
     base = L.get(lang, L["en"]).get(key) or L["en"].get(key, key)
+    return base.format(**kwargs) if kwargs else base
+
+def tx(lang: str, key: str, **kwargs) -> str:
+    # Return translated long text, fallback to English
+    base = TEXTS.get(lang, TEXTS["en"]).get(key, TEXTS["en"].get(key, ""))
     return base.format(**kwargs) if kwargs else base
 
 # =====================
@@ -142,10 +477,8 @@ def load_store():
         if os.path.exists(DATA_PATH):
             with open(DATA_PATH, "r", encoding="utf-8") as f:
                 STORE = json.load(f)
-            STORE.setdefault("users", {})
-            STORE.setdefault("leads", {})
-            STORE.setdefault("events", [])
-            STORE.setdefault("memberships", {})
+            for k in ("users", "leads", "events", "memberships"):
+                STORE.setdefault(k, {} if k != "events" else [])
         else:
             save_store()
     except Exception as e:
@@ -194,7 +527,6 @@ def log_event(user_id: int, etype: str, meta: Dict[str, Any]):
 
 # --- Membership helpers
 def activate_membership(user_id: int, plan: str):
-    """Mark a user as active member for a given plan."""
     STORE["memberships"][str(user_id)] = {
         "plan": plan,  # "1_month" | "lifetime"
         "activated_at": datetime.now(timezone.utc).isoformat(),
@@ -241,70 +573,12 @@ def ratelimited(user_id: int, seconds: int = 1) -> bool:
     return False
 
 # =====================
-# Your exact copy (kept)
-# =====================
-WELCOME_TEXT = (
-    "💎 **Welcome to the VIP Bot!**\n\n"
-    "💎 *Get access to thousands of creators every month!*\n"
-    "⚡ *Instant access to the VIP link sent directly to your email!*\n"
-    "⭐ *Don’t see the model you’re looking for? We’ll add them within 24–72 hours!*\n\n"
-    "📌 Got questions ? VIP link not working ? Contact support 🔍👀"
-)
-SELECT_PLAN_TEXT = lambda plan_text: (
-    f"⭐ You have chosen the **{plan_text}** plan.\n\n"
-    "💳 **Apple Pay/Google Pay:** 🚀 Instant VIP access (link emailed immediately).\n"
-    "⚡ **Crypto:** (30 - 60 min wait time), VIP link sent manually.\n"
-    "📧 **PayPal:**(30 - 60 min wait time), VIP link sent manually.\n\n"
-    "🎉 Choose your preferred payment method below and get access today!"
-)
-SHOPIFY_TEXT = (
-    "🚀 **Instant Access with Apple Pay/Google Pay!**\n\n"
-    "🎁 **Choose Your VIP Plan:**\n"
-    "💎 Lifetime Access: **£20.00 GBP** 🎉\n"
-    "⏳ 1 Month Access: **£10.00 GBP** 🌟\n\n"
-    "🛒 Click below to pay securely and get **INSTANT VIP access** delivered to your email! 📧\n\n"
-    "✅ After payment, click 'I've Paid' to confirm."
-)
-CRYPTO_TEXT = (
-    "⚡ **Pay Securely with Crypto!**\n\n"
-    "🔗 Open the crypto payment mini‑app below inside Telegram.\n\n"
-    "💎 **Choose Your Plan:**\n"
-    "⏳ 1 Month Access: **$13.00 USD** 🌟\n"
-    "💎 Lifetime Access: **$27 USD** 🎉\n\n"
-    "✅ Once you've sent the payment, click 'I've Paid' to confirm."
-)
-PAYPAL_TEXT = (
-    "💸 **Easy Payment with PayPal!**\n\n"
-    f"`{PAYMENT_INFO['paypal']}`\n\n"
-    "💎 **Choose Your Plan:**\n"
-    "⏳ 1 Month Access: **£10.00 GBP** 🌟\n"
-    "💎 Lifetime Access: **£20.00 GBP** 🎉\n\n"
-    "✅ Once payment is complete, click 'I've Paid' to confirm."
-)
-PAID_THANKS_TEXT = (
-    "✅ **Payment Received! Thank You!** 🎉\n\n"
-    "📸 Please send a **screenshot** or **transaction ID** to our support team for verification.\n"
-    f"👉 {SUPPORT_CONTACT}\n\n"
-    "⚡ **Important Notice:**\n"
-    "🔗 If you paid via Apple Pay/Google Pay, check your email inbox for the VIP link.\n"
-    "🔗 If you paid via PayPal or Crypto, your VIP link will be sent manually."
-)
-SUPPORT_PAGE_TEXT = (
-    "💬 **Need Assistance? We're Here to Help!**\n\n"
-    "🕒 **Working Hours:** 8:00 AM - 12:00 AM BST\n"
-    f"📨 For support, contact us directly at:\n"
-    f"👉 {SUPPORT_CONTACT}\n\n"
-    "⚡ Our team is ready to assist you as quickly as possible. "
-    "Thank you for choosing VIP Bot! 💎"
-)
-
-# =====================
 # Keyboards
 # =====================
 def main_menu(lang="en") -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("1 Month (£10.00)", callback_data="select_1_month")],
-        [InlineKeyboardButton("Lifetime (£20.00)", callback_data="select_lifetime")],
+        [InlineKeyboardButton("1 Month (£10.00)", callback_data="select_1_month")],   # keep exact text
+        [InlineKeyboardButton("Lifetime (£20.00)", callback_data="select_lifetime")],# keep exact text
         [InlineKeyboardButton(tr(lang, "menu_support"), callback_data="support")],
     ]
     if HAS_MEDIA:
@@ -331,8 +605,8 @@ def shopify_menu_webapp(lang="en", coupon: Optional[str] = None) -> InlineKeyboa
     lt = add_coupon_to_url(PAYMENT_INFO["shopify"]["lifetime"], coupon)
     m1 = add_coupon_to_url(PAYMENT_INFO["shopify"]["1_month"], coupon)
     return InlineKeyboardMarkup([
-        [safe_button("💎 Lifetime (£20.00)", lt, as_webapp=True)],
-        [safe_button("⏳ 1 Month (£10.00)", m1, as_webapp=True)],
+        [safe_button("💎 Lifetime (£20.00)", lt, as_webapp=True)],  # keep exact
+        [safe_button("⏳ 1 Month (£10.00)", m1, as_webapp=True)],   # keep exact
         [InlineKeyboardButton(tr(lang, "ive_paid"), callback_data="paid")],
         [InlineKeyboardButton(tr(lang, "back"), callback_data="back")],
     ])
@@ -340,7 +614,7 @@ def shopify_menu_webapp(lang="en", coupon: Optional[str] = None) -> InlineKeyboa
 def crypto_menu(lang="en") -> InlineKeyboardMarkup:
     link = PAYMENT_INFO["crypto"]["link"]
     return InlineKeyboardMarkup([
-        [safe_button(tr(lang, "open_crypto"), link, as_webapp=True)],  # fallback to URL for t.me links
+        [safe_button(tr(lang, "open_crypto"), link, as_webapp=True)],  # fallback if t.me
         [InlineKeyboardButton(tr(lang, "ive_paid"), callback_data="paid")],
         [InlineKeyboardButton(tr(lang, "back"), callback_data="back")],
     ])
@@ -360,9 +634,23 @@ def media_menu_webapps(lang="en") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 def language_menu() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(code, callback_data=f"lang_{code}")] for code in SUPPORTED_LANGS]
+    # flags grid (two columns)
+    rows, row = [], []
+    for code in SUPPORTED_LANGS:
+        label = f"{FLAGS.get(code,'🏳️')} {code}"
+        row.append(InlineKeyboardButton(label, callback_data=f"lang_{code}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row: rows.append(row)
     rows.append([InlineKeyboardButton("Close", callback_data="back")])
     return InlineKeyboardMarkup(rows)
+
+def detect_lang(update: Update) -> str:
+    code = (update.effective_user.language_code or "en").split("-")[0]
+    # zh-Hans handling (Telegram may give 'zh')
+    if code == "zh":
+        code = "zh-Hans"
+    return code if code in L else "en"
 
 def normalize_coupon(text: str) -> Optional[str]:
     if not text: return None
@@ -377,7 +665,7 @@ async def reminder_loop(app: Application):
         try:
             now = datetime.now(timezone.utc)
 
-            # --- Lead reminders (1h, 24h)
+            # Lead reminders
             for uid, lead in list(STORE["leads"].items()):
                 if not lead.get("active"):
                     continue
@@ -401,7 +689,7 @@ async def reminder_loop(app: Application):
                         lead["reminded"].append(idx)
                         save_store()
 
-            # --- Membership expiry scan (day 28 for 1-month plan)
+            # Membership expiry scan (day 28 for 1-month plan)
             for uid, ms in list(STORE["memberships"].items()):
                 if not ms or ms.get("plan") != "1_month":
                     continue
@@ -410,9 +698,7 @@ async def reminder_loop(app: Application):
                 try:
                     activated = datetime.fromisoformat(ms["activated_at"])
                 except Exception:
-                    # bad timestamp; skip
                     continue
-
                 if now - activated >= timedelta(days=28):
                     await notify_membership_expiry(int(uid), ms)
                     ms["expiry_notified"] = True
@@ -423,26 +709,10 @@ async def reminder_loop(app: Application):
             logger.warning("Reminder loop error: %s", e)
             await asyncio.sleep(5)
 
-def _reminder_text(lang: str, step_idx: int, plan: str, method: Optional[str]) -> str:
-    if step_idx == 0:
-        return (
-            "⏰ **Quick reminder**\n\n"
-            "Your VIP access is waiting — complete your checkout in one tap to secure today’s price. "
-            "Need help? Tap Support anytime."
-        )
-    else:
-        return (
-            "⛳ **Last chance today**\n\n"
-            "Spots are nearly gone and prices can change. Finish your payment now to lock in your VIP access. "
-            "If you need assistance, we're here."
-        )
-
 async def send_reminder(user_id: int, step_idx: int, lead: Dict[str, Any]):
     lang = user_lang(user_id)
     try:
-        plan = lead.get("plan", "1_month")
-        method = lead.get("method")
-        text = _reminder_text(lang, step_idx, plan, method)
+        text = tx(lang, "reminder0" if step_idx == 0 else "reminder1")
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(tr(lang, "reminder_resume"), callback_data="resume_checkout")],
             [InlineKeyboardButton(tr(lang, "reminder_snooze"), callback_data="snooze")],
@@ -453,21 +723,16 @@ async def send_reminder(user_id: int, step_idx: int, lead: Dict[str, Any]):
         logger.warning("Failed to send reminder to %s: %s", user_id, e)
 
 async def notify_membership_expiry(user_id: int, ms: Dict[str, Any]):
-    """DM user + ping admin that a 1-month membership is at 28 days (renewal prompt)."""
     lang = user_lang(user_id)
-    # User reminder with Renew button
+    # User reminder
     renew_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔁 Renew 1 Month (£10.00)", callback_data="payment_shopify_1_month")],
-        [InlineKeyboardButton("💬 Support", callback_data="support")],
+        [InlineKeyboardButton(tr(lang, "menu_support"), callback_data="support")],
     ])
     try:
         await telegram_app.bot.send_message(
             chat_id=user_id,
-            text=(
-                "⏳ *Membership notice*\n\n"
-                "Your *1‑Month VIP access* is reaching *28 days*. To avoid interruption, "
-                "renew now in one tap."
-            ),
+            text=tx(lang, "membership_notice"),
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=renew_kb,
         )
@@ -511,6 +776,7 @@ async def startup_event():
     telegram_app.add_handler(CommandHandler("status", status_cmd, block=False))
     telegram_app.add_handler(CommandHandler("terms", terms_cmd, block=False))
     telegram_app.add_handler(CommandHandler("id", id_cmd, block=False))
+    telegram_app.add_handler(CommandHandler("lang", lang_cmd, block=False))
     telegram_app.add_handler(CommandHandler("broadcast", admin_broadcast, block=False))
     telegram_app.add_handler(CommandHandler("stats", admin_stats, block=False))
     telegram_app.add_handler(CommandHandler("find", admin_find, block=False))
@@ -612,10 +878,6 @@ async def webhook(
 # =====================
 # Telegram Handlers
 # =====================
-def detect_lang(update: Update) -> str:
-    code = (update.effective_user.language_code or "en").split("-")[0]
-    return code if code in L else "en"
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if ratelimited(user.id): return
@@ -629,7 +891,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ref = context.args[0][:32]
         set_user_field(user.id, "ref", ref)
 
-    # Language
+    # Language auto-detect
     lang = detect_lang(update)
     set_user_lang(user.id, lang)
 
@@ -639,14 +901,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("1 Month (£10.00)", callback_data="select_1_month")],
             [InlineKeyboardButton("Lifetime (£20.00)", callback_data="select_lifetime")],
-            [InlineKeyboardButton("🧾 Resume checkout", callback_data="resume_checkout")],
+            [InlineKeyboardButton(tr(lang, "resume"), callback_data="resume_checkout")],
             [InlineKeyboardButton(tr(lang, "menu_support"), callback_data="support")],
         ])
     else:
         kb = main_menu(lang)
 
     await update.effective_message.reply_text(
-        WELCOME_TEXT,
+        tx(lang, "welcome"),  # translated welcome (fallback to your original)
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb,
         disable_web_page_preview=True,
@@ -675,16 +937,19 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
 
 async def terms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = (
+    await update.effective_message.reply_text(
         "*Terms & Notes*\n"
         "• Access is for personal use only; redistribution may lead to a ban\n"
         "• Refunds assessed case‑by‑case if access was not delivered\n"
-        "• By purchasing, you accept these terms\n"
+        "• By purchasing, you accept these terms\n",
+        parse_mode=ParseMode.MARKDOWN
     )
-    await update.effective_message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
 
 async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(f"Your ID: `{update.effective_user.id}`", parse_mode=ParseMode.MARKDOWN)
+
+async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(tr(user_lang(update.effective_user.id), "choose_language"), reply_markup=language_menu())
 
 # --- Inline callbacks
 async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -699,9 +964,8 @@ async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
     start_lead(user.id, plan)
     set_user_field(user.id, "last_plan", plan)
 
-    message = SELECT_PLAN_TEXT(plan_text)
     await q.edit_message_text(
-        text=message,
+        text=tx(lang, "select_plan", plan_text=plan_text),
         reply_markup=payment_selector(plan, lang),
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -714,27 +978,25 @@ async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = user_lang(user.id)
 
     _, method, plan = q.data.split("_", 2)
-    plan_text = "LIFETIME" if plan == "lifetime" else "1 MONTH"
-
     set_user_field(user.id, "last_plan", plan)
     set_user_field(user.id, "last_method", method)
     lead = STORE["leads"].setdefault(str(user.id), {"active": True})
     lead["method"] = method
     save_store()
 
-    context.user_data["plan_text"] = plan_text
+    context.user_data["plan_text"] = "LIFETIME" if plan == "lifetime" else "1 MONTH"
     context.user_data["method"] = method
 
     coupon = STORE["users"].get(str(user.id), {}).get("coupon")
 
     if method == "shopify":
-        msg = SHOPIFY_TEXT
+        msg = tx(lang, "shopify")
         kb = shopify_menu_webapp(lang, coupon=coupon)
     elif method == "crypto":
-        msg = CRYPTO_TEXT
+        msg = tx(lang, "crypto")
         kb = crypto_menu(lang)
     elif method == "paypal":
-        msg = PAYPAL_TEXT
+        msg = tx(lang, "paypal")
         kb = paypal_menu(lang)
     else:
         msg = "Unknown payment method."
@@ -752,12 +1014,13 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     user = q.from_user
+    lang = user_lang(user.id)
     plan_text = context.user_data.get("plan_text", "N/A")
     method = context.user_data.get("method", "N/A")
     username = q.from_user.username or "No Username"
     current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # Close the lead (stop 1h/24h reminders)
+    # Close the lead (stop reminders)
     close_lead(user.id)
 
     # Activate membership if it's a 1-month plan
@@ -783,7 +1046,7 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning("Admin notification failed: %s", e)
 
-    await q.edit_message_text(PAID_THANKS_TEXT, parse_mode=ParseMode.MARKDOWN)
+    await q.edit_message_text(tx(lang, "paid_thanks"), parse_mode=ParseMode.MARKDOWN)
     set_user_field(user.id, "awaiting_proof", True)
     log_event(user.id, "paid_clicked", {"method": method})
 
@@ -792,10 +1055,10 @@ async def handle_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     lang = user_lang(q.from_user.id)
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌐 Change language", callback_data="lang_menu")],
+        [InlineKeyboardButton(tr(lang, "change_language"), callback_data="lang_menu")],
         [InlineKeyboardButton(tr(lang, "back"), callback_data="back")],
     ])
-    await q.edit_message_text(SUPPORT_PAGE_TEXT, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
+    await q.edit_message_text(tx(lang, "support_page"), reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -849,7 +1112,7 @@ async def handle_resume_or_snooze(update: Update, context: ContextTypes.DEFAULT_
 
     plan = (lead or {}).get("plan") or STORE["users"].get(str(uid), {}).get("last_plan", "1_month")
     await q.edit_message_text(
-        SELECT_PLAN_TEXT("LIFETIME" if plan == "lifetime" else "1 MONTH"),
+        tx(lang, "select_plan", plan_text=("LIFETIME" if plan == "lifetime" else "1 MONTH")),
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=payment_selector(plan, lang)
     )
