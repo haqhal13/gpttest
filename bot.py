@@ -1,111 +1,168 @@
 # bot.py
 import os
 import logging
-from datetime import datetime
-from typing import Optional
+import asyncio
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict
 
 import httpx
 from fastapi import FastAPI, Request, Header, HTTPException, Response
 from fastapi.responses import JSONResponse
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputFile,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
-# -----------------------------
-# Configuration (ENV first!)
-# -----------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # <-- set in Render env; rotate your token!
+# =========================
+# Configuration (ENV first)
+# =========================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set. Add it to your environment.")
+    raise RuntimeError("BOT_TOKEN is not set. Add it to env and redeploy.")
 
-BASE_URL = os.getenv("BASE_URL", "https://gpttest-xrfu.onrender.com")  # your public Render URL
+BASE_URL = os.getenv("BASE_URL", "https://your-service.onrender.com")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "CHANGE_THIS_TO_A_LONG_RANDOM_STRING")
 
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "please-change-me-to-a-long-random-string")
+SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "@Sebvip")
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0")) or None  # optional
 ALLOWED_UPDATES = ["message", "callback_query"]
 
-UPTIME_MONITOR_URL = os.getenv("UPTIME_MONITOR_URL", "https://bot-1-f2wh.onrender.com/uptime")
-SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "@Sebvip")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # set to a chat ID string; optional
+# Optional controls
+MAINTENANCE_MODE = os.getenv("MAINTENANCE_MODE", "0") == "1"  # if 1, show maintenance banner
+WORKING_HOURS = os.getenv("WORKING_HOURS", "08:00-00:00")  # for info display only
+TZ_OFFSET = int(os.getenv("TZ_OFFSET_MINUTES", "0"))  # minutes offset if you want localish times
 
-# Payment Info (static links provided)
+UPTIME_MONITOR_URL = os.getenv("UPTIME_MONITOR_URL", "")
+ENV_NAME = os.getenv("ENV_NAME", "production")
+
+# Payment links
 PAYMENT_INFO = {
     "shopify": {
         "1_month": "https://nt9qev-td.myshopify.com/cart/55619895394678:1",
         "lifetime": "https://nt9qev-td.myshopify.com/cart/55619898737014:1",
     },
     "crypto": {"link": "https://t.me/+318ocdUDrbA4ODk0"},
-    "paypal": "@Aieducation ON PAYPAL F&F only we cant process order if it isnt F&F",
+    "paypal": "@Aieducation ON PAYPAL F&F only; we can’t process if not F&F",
 }
 
-# -----------------------------
+# ==========
 # Logging
-# -----------------------------
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# ==========
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger("vip-bot")
 
-# -----------------------------
-# FastAPI + Telegram App
-# -----------------------------
+# ===============================
+# FastAPI + Telegram integration
+# ===============================
 app = FastAPI()
 telegram_app: Optional[Application] = None
-START_TIME = datetime.now()
+START_TIME = datetime.now(timezone.utc)
 
+# Simple in-memory rate limit + state
+RATE_LIMIT_BUCKET: Dict[int, float] = {}
+USER_STATE: Dict[int, Dict[str, bool]] = {}  # e.g., {"awaiting_proof": True}
 
+def now_local() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(minutes=TZ_OFFSET)
+
+def human_uptime() -> str:
+    delta = datetime.now(timezone.utc) - START_TIME
+    # Simple humanize
+    d = delta.days
+    s = delta.seconds
+    h = s // 3600
+    m = (s % 3600) // 60
+    return f"{d}d {h}h {m}m"
+
+def ratelimited(user_id: int, seconds: int = 2) -> bool:
+    """Return True if still under rate-limit; otherwise False and set new window."""
+    last = RATE_LIMIT_BUCKET.get(user_id, 0.0)
+    now = datetime.now().timestamp()
+    if now - last < seconds:
+        return True
+    RATE_LIMIT_BUCKET[user_id] = now
+    return False
+
+def banner() -> str:
+    return "🛠 *Maintenance Mode:* Some features may be limited.\n\n" if MAINTENANCE_MODE else ""
+
+# --------------
+# Startup/Stop
+# --------------
 @app.on_event("startup")
 async def startup_event():
-    """Initialize Telegram app, set webhook, and start the bot."""
     global telegram_app
-    try:
-        logger.info("Starting up…")
-        telegram_app = Application.builder().token(BOT_TOKEN).build()
+    logger.info("Starting VIP Bot (%s)…", ENV_NAME)
+    telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-        # Handlers
-        telegram_app.add_handler(CommandHandler("start", start))
-        telegram_app.add_handler(CallbackQueryHandler(handle_subscription, pattern=r"^select_"))
-        telegram_app.add_handler(CallbackQueryHandler(handle_payment, pattern=r"^payment_"))
-        telegram_app.add_handler(CallbackQueryHandler(confirm_payment, pattern=r"^paid$"))
-        telegram_app.add_handler(CallbackQueryHandler(handle_back, pattern=r"^back$"))
-        telegram_app.add_handler(CallbackQueryHandler(handle_support, pattern=r"^support$"))
+    # Commands
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("help", help_cmd))
+    telegram_app.add_handler(CommandHandler("plans", plans_cmd))
+    telegram_app.add_handler(CommandHandler("support", support_cmd))
+    telegram_app.add_handler(CommandHandler("terms", terms_cmd))
+    telegram_app.add_handler(CommandHandler("status", status_cmd))
 
-        await telegram_app.initialize()
-        logger.info("Telegram application initialized.")
+    # Admin-only broadcast: /broadcast Your message...
+    telegram_app.add_handler(CommandHandler("broadcast", admin_broadcast))
 
-        # Optional: ping uptime monitor
+    # Callback flows
+    telegram_app.add_handler(CallbackQueryHandler(handle_subscription, pattern=r"^select_"))
+    telegram_app.add_handler(CallbackQueryHandler(handle_payment, pattern=r"^payment_"))
+    telegram_app.add_handler(CallbackQueryHandler(confirm_payment, pattern=r"^paid$"))
+    telegram_app.add_handler(CallbackQueryHandler(handle_back, pattern=r"^back$"))
+    telegram_app.add_handler(CallbackQueryHandler(handle_support_cb, pattern=r"^support$"))
+    telegram_app.add_handler(CallbackQueryHandler(show_plans_cb, pattern=r"^plans$"))
+
+    # Payment proof handlers
+    telegram_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_possible_proof))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_fallback))
+
+    # Global error handler
+    telegram_app.add_error_handler(on_error)
+
+    await telegram_app.initialize()
+
+    # Optional: ping uptime monitor once
+    if UPTIME_MONITOR_URL:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 r = await client.get(UPTIME_MONITOR_URL)
-                logger.info("Uptime monitor status: %s", r.status_code)
+                logger.info("Uptime monitor responded: %s", r.status_code)
         except Exception as e:
-            logger.warning("Uptime monitoring failed: %s", e)
+            logger.warning("Uptime monitor ping failed: %s", e)
 
-        # Configure webhook
-        await telegram_app.bot.delete_webhook()
-        await telegram_app.bot.set_webhook(
-            url=WEBHOOK_URL,
-            secret_token=WEBHOOK_SECRET,
-            drop_pending_updates=True,
-            allowed_updates=ALLOWED_UPDATES,
-        )
-        logger.info("Webhook set to %s", WEBHOOK_URL)
-
-        await telegram_app.start()
-        logger.info("Telegram bot started.")
-    except Exception as e:
-        logger.exception("Error during startup: %s", e)
-        raise
-
+    # Webhook
+    await telegram_app.bot.delete_webhook()
+    await telegram_app.bot.set_webhook(
+        url=WEBHOOK_URL,
+        secret_token=WEBHOOK_SECRET,
+        drop_pending_updates=True,
+        allowed_updates=ALLOWED_UPDATES,
+    )
+    logger.info("Webhook set: %s", WEBHOOK_URL)
+    await telegram_app.start()
+    logger.info("Telegram bot started.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Gracefully stop Telegram app on shutdown."""
     global telegram_app
     if telegram_app:
         try:
@@ -113,19 +170,29 @@ async def shutdown_event():
             await telegram_app.shutdown()
             logger.info("Telegram app stopped.")
         except Exception as e:
-            logger.exception("Error during shutdown: %s", e)
+            logger.exception("Shutdown error: %s", e)
 
-
-# ---------------
-# Health Endpoints
-# ---------------
+# --------------
+# Health/Status
+# --------------
 @app.get("/")
 async def root():
-    return {"ok": True, "webhook": WEBHOOK_URL}
+    return {"ok": True, "env": ENV_NAME, "webhook": WEBHOOK_URL}
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    return {"status": "healthy", "uptime": human_uptime()}
+
+@app.get("/status")
+async def http_status():
+    return {
+        "env": ENV_NAME,
+        "maintenance": MAINTENANCE_MODE,
+        "uptime": human_uptime(),
+        "start_time_utc": START_TIME.isoformat(),
+        "webhook": WEBHOOK_URL,
+        "allowed_updates": ALLOWED_UPDATES,
+    }
 
 @app.head("/uptime")
 async def head_uptime():
@@ -133,218 +200,330 @@ async def head_uptime():
 
 @app.get("/uptime")
 async def get_uptime():
-    current_time = datetime.now()
-    uptime_duration = current_time - START_TIME
     return JSONResponse(
         content={
             "status": "online",
-            "uptime": str(uptime_duration),
-            "start_time": START_TIME.strftime("%Y-%m-%d %H:%M:%S"),
+            "uptime": human_uptime(),
+            "start_time_utc": START_TIME.strftime("%Y-%m-%d %H:%M:%S"),
         }
     )
 
-
-# ---------------
-# Webhook endpoint
-# ---------------
+# --------------
+# Webhook entry
+# --------------
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(
     request: Request,
     x_telegram_bot_api_secret_token: Optional[str] = Header(None),
 ):
-    # Verify Telegram's secret header
     if WEBHOOK_SECRET and x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
-        logger.warning("Invalid webhook secret token.")
+        logger.warning("Invalid webhook secret.")
         raise HTTPException(status_code=401, detail="Invalid secret token")
 
     global telegram_app
     if telegram_app is None:
-        logger.error("Telegram application not initialized.")
         raise HTTPException(status_code=503, detail="Bot not ready")
 
     try:
         data = await request.json()
         update = Update.de_json(data, telegram_app.bot)
-        logger.debug("Received update: %s", data)
         await telegram_app.process_update(update)
         return {"status": "ok"}
     except Exception as e:
         logger.exception("Error processing webhook: %s", e)
         return {"status": "error", "message": str(e)}
 
-
-# -----------------------------
+# ==================
 # Telegram Handlers
-# -----------------------------
+# ==================
+MAIN_MENU = InlineKeyboardMarkup([
+    [InlineKeyboardButton("✨ View Plans", callback_data="plans")],
+    [InlineKeyboardButton("💬 Support", callback_data="support")],
+])
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if ratelimited(user.id, seconds=1):
+        return
+
+    text = (
+        f"{banner()}"
+        "💎 *Welcome to VIP Bot!*\n\n"
+        "• *Instant* email delivery on Apple Pay / Google Pay\n"
+        "• Don’t see a model? We add them within *24–72h*\n"
+        f"• Support hours: `{WORKING_HOURS}`\n"
+    )
+    await update.effective_message.reply_text(
+        text, parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_MENU
+    )
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ratelimited(update.effective_user.id):
+        return
+    text = (
+        "*Commands*\n"
+        "/start – Main menu\n"
+        "/plans – Show plans\n"
+        "/support – Contact support\n"
+        "/terms – Terms & notes\n"
+        "/status – Bot status\n"
+    )
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+async def plans_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ratelimited(update.effective_user.id):
+        return
+    await show_plans(update.effective_message, context)
+
+async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ratelimited(update.effective_user.id):
+        return
+    await render_support(update.effective_message, context)
+
+async def terms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ratelimited(update.effective_user.id):
+        return
+    text = (
+        "*Terms & Notes*\n"
+        "• Access is for personal use only; redistribution may lead to a ban\n"
+        "• Refunds assessed case‑by‑case if access was not delivered\n"
+        "• By purchasing, you accept these terms\n"
+    )
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ratelimited(update.effective_user.id, seconds=3):
+        return
+    text = (
+        f"*Status*: Online\n"
+        f"*Env*: `{ENV_NAME}`\n"
+        f"*Uptime*: `{human_uptime()}`\n"
+        f"*Maintenance*: `{MAINTENANCE_MODE}`\n"
+        f"*Webhook*: `{WEBHOOK_URL}`\n"
+        f"*Server Time*: `{now_local().strftime('%Y-%m-%d %H:%M:%S')}`\n"
+    )
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+# --- Inline callbacks
+async def show_plans_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await show_plans(update.callback_query, context)
+
+async def show_plans(target, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("1 Month (£10.00)", callback_data="select_1_month")],
         [InlineKeyboardButton("Lifetime (£20.00)", callback_data="select_lifetime")],
-        [InlineKeyboardButton("Support", callback_data="support")],
+        [InlineKeyboardButton("🔙 Back", callback_data="back")],
     ]
-    text = (
-        "💎 *Welcome to the VIP Bot!*\n\n"
-        "💎 *Get access to thousands of creators every month!*\n"
-        "⚡ *Instant access to the VIP link sent directly to your email!*\n"
-        "⭐ *Don’t see the model you’re looking for? We’ll add them within 24–72 hours!*\n\n"
-        "📌 Got questions? VIP link not working? Contact support 🔍👀"
+    msg = (
+        "*Choose a plan:*\n"
+        "• 1 Month – £10.00\n"
+        "• Lifetime – £20.00\n\n"
+        "_Tip: Apple/Google Pay = instant email delivery_"
     )
-    await update.effective_message.reply_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN,
+    await target.edit_message_text(
+        msg, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard)
+    ) if hasattr(target, "edit_message_text") else target.reply_text(
+        msg, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard)
     )
-
 
 async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    plan = query.data.split("_", 1)[1]
+    q = update.callback_query
+    await q.answer()
+    plan = q.data.split("_", 1)[1]
     plan_text = "LIFETIME" if plan == "lifetime" else "1 MONTH"
+
     keyboard = [
-        [InlineKeyboardButton("💳 Apple Pay/Google Pay 🚀 (Instant Access)", callback_data=f"payment_shopify_{plan}")],
-        [InlineKeyboardButton("⚡ Crypto ⏳ (30 - 60 min wait time)", callback_data=f"payment_crypto_{plan}")],
-        [InlineKeyboardButton("📧 PayPal 💌 (30 - 60 min wait time)", callback_data=f"payment_paypal_{plan}")],
+        [InlineKeyboardButton("💳 Apple/Google Pay (Instant)", callback_data=f"payment_shopify_{plan}")],
+        [InlineKeyboardButton("⚡ Crypto (30–60m manual)", callback_data=f"payment_crypto_{plan}")],
+        [InlineKeyboardButton("📧 PayPal F&F (30–60m)", callback_data=f"payment_paypal_{plan}")],
         [InlineKeyboardButton("💬 Support", callback_data="support")],
-        [InlineKeyboardButton("🔙 Go Back", callback_data="back")],
+        [InlineKeyboardButton("🔙 Back", callback_data="back")],
     ]
-
-    message = (
-        f"⭐ You have chosen the *{plan_text}* plan.\n\n"
-        "💳 *Apple Pay/Google Pay:* 🚀 Instant VIP access (link emailed immediately).\n"
-        "⚡ *Crypto:* (30 - 60 min wait time), VIP link sent manually.\n"
-        "📧 *PayPal:* (30 - 60 min wait time), VIP link sent manually.\n\n"
-        "🎉 Choose your preferred payment method below and get access today!"
+    msg = (
+        f"⭐ You chose *{plan_text}*.\n\n"
+        "Pick a payment method below:"
     )
-    await query.edit_message_text(
-        text=message,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
+    await q.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    _, method, plan = query.data.split("_", 2)
+    q = update.callback_query
+    await q.answer()
+    _, method, plan = q.data.split("_", 2)
     plan_text = "LIFETIME" if plan == "lifetime" else "1 MONTH"
-
     context.user_data["plan_text"] = plan_text
     context.user_data["method"] = method
 
     if method == "shopify":
-        message = (
-            "🚀 *Instant Access with Apple Pay/Google Pay!*\n\n"
-            "🎁 *Choose Your VIP Plan:*\n"
-            "💎 Lifetime Access: *£20.00 GBP* 🎉\n"
-            "⏳ 1 Month Access: *£10.00 GBP* 🌟\n\n"
-            "🛒 Tap a button to pay securely and get *INSTANT VIP access* delivered to your email! 📧\n\n"
-            "✅ After payment, tap *I've Paid* to confirm."
+        msg = (
+            "🚀 *Instant Access with Apple/Google Pay*\n\n"
+            "Tap a button to pay securely. Your VIP link is emailed instantly.\n\n"
+            "✅ After paying, tap *I've Paid* and (optionally) send a screenshot."
         )
-        # URL buttons are simpler & more reliable than WebApp for plain links
-        keyboard = [
-            [InlineKeyboardButton("💎 Lifetime (£20.00)", url=PAYMENT_INFO["shopify"]["lifetime"])],
-            [InlineKeyboardButton("⏳ 1 Month (£10.00)", url=PAYMENT_INFO["shopify"]["1_month"])],
+        kb = [
+            [InlineKeyboardButton("💎 Lifetime (£20)", url=PAYMENT_INFO["shopify"]["lifetime"])],
+            [InlineKeyboardButton("⏳ 1 Month (£10)", url=PAYMENT_INFO["shopify"]["1_month"])],
             [InlineKeyboardButton("✅ I've Paid", callback_data="paid")],
-            [InlineKeyboardButton("🔙 Go Back", callback_data="back")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back")],
         ]
     elif method == "crypto":
-        message = (
-            "⚡ *Pay Securely with Crypto!*\n\n"
-            f"[Crypto Payment Link]({PAYMENT_INFO['crypto']['link']})\n\n"
-            "💎 *Choose Your Plan:*\n"
-            "⏳ 1 Month Access: *$13.00 USD* 🌟\n"
-            "💎 Lifetime Access: *$27 USD* 🎉\n\n"
-            "✅ Once you've sent the payment, tap *I've Paid* to confirm."
+        msg = (
+            "⚡ *Pay with Crypto*\n"
+            f"[Open Payment Link]({PAYMENT_INFO['crypto']['link']})\n\n"
+            "Manual verification ~30–60m.\n"
+            "✅ After paying, tap *I've Paid* and send a screenshot / txn ID."
         )
-        keyboard = [
+        kb = [
             [InlineKeyboardButton("✅ I've Paid", callback_data="paid")],
-            [InlineKeyboardButton("🔙 Go Back", callback_data="back")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back")],
         ]
     elif method == "paypal":
-        message = (
-            "💸 *Easy Payment with PayPal!*\n\n"
+        msg = (
+            "💸 *PayPal (Friends & Family only)*\n"
             f"`{PAYMENT_INFO['paypal']}`\n\n"
-            "💎 *Choose Your Plan:*\n"
-            "⏳ 1 Month Access: *£10.00 GBP* 🌟\n"
-            "💎 Lifetime Access: *£20.00 GBP* 🎉\n\n"
-            "✅ Once payment is complete, tap *I've Paid* to confirm."
+            "Manual verification ~30–60m.\n"
+            "✅ After paying, tap *I've Paid* and send a screenshot / txn ID."
         )
-        keyboard = [
+        kb = [
             [InlineKeyboardButton("✅ I've Paid", callback_data="paid")],
-            [InlineKeyboardButton("🔙 Go Back", callback_data="back")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back")],
         ]
     else:
-        message = "Unknown payment method."
-        keyboard = [[InlineKeyboardButton("🔙 Go Back", callback_data="back")]]
+        msg = "Unknown method."
+        kb = [[InlineKeyboardButton("🔙 Back", callback_data="back")]]
 
-    await query.edit_message_text(
-        text=message,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
+    await q.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(kb))
 
 async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    q = update.callback_query
+    await q.answer()
 
+    user = q.from_user
     plan_text = context.user_data.get("plan_text", "N/A")
     method = context.user_data.get("method", "N/A")
-    username = query.from_user.username or "No Username"
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = now_local().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Notify admin if configured
+    # Flip state to request proof
+    st = USER_STATE.setdefault(user.id, {})
+    st["awaiting_proof"] = True
+
+    # Notify admin
     if ADMIN_CHAT_ID:
         try:
             await context.bot.send_message(
-                chat_id=int(ADMIN_CHAT_ID),
+                chat_id=ADMIN_CHAT_ID,
                 text=(
-                    "📝 *Payment Notification*\n"
-                    f"👤 *User:* @{username}\n"
+                    "📝 *Payment Confirmation Clicked*\n"
+                    f"👤 *User:* @{user.username or user.id}\n"
                     f"📋 *Plan:* {plan_text}\n"
-                    f"💳 *Method:* {method.capitalize()}\n"
-                    f"🕒 *Time:* {current_time}"
+                    f"💳 *Method:* {method}\n"
+                    f"🕒 *Time:* {ts}"
                 ),
                 parse_mode=ParseMode.MARKDOWN,
             )
         except Exception as e:
-            logger.warning("Failed to notify admin: %s", e)
+            logger.warning("Admin notify failed: %s", e)
 
-    await query.edit_message_text(
+    await q.edit_message_text(
         text=(
-            "✅ *Payment Received! Thank You!* 🎉\n\n"
-            "📸 Please send a *screenshot* or *transaction ID* to our support team for verification.\n"
-            f"👉 {SUPPORT_CONTACT}\n\n"
-            "⚡ *Important Notice:*\n"
-            "🔗 If you paid via Apple Pay/Google Pay, check your email inbox for the VIP link.\n"
-            "🔗 If you paid via PayPal or Crypto, your VIP link will be sent manually."
+            "✅ *Thanks!*\n\n"
+            "If you haven’t received instant email access (Apple/Google Pay), please *send a screenshot* or *transaction ID* here now.\n"
+            f"Or message support: {SUPPORT_CONTACT}\n\n"
+            "_This helps us verify quickly._"
         ),
         parse_mode=ParseMode.MARKDOWN,
     )
 
+async def handle_support_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await render_support(update.callback_query, context)
 
-async def handle_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        text=(
-            "💬 *Need Assistance? We're Here to Help!*\n\n"
-            "🕒 *Working Hours:* 8:00 AM - 12:00 AM BST\n"
-            "📨 For support, contact us directly at:\n"
-            f"👉 {SUPPORT_CONTACT}\n\n"
-            "⚡ Our team is ready to assist you as quickly as possible.\n"
-            "Thank you for choosing VIP Bot! 💎"
-        ),
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Go Back", callback_data="back")]]),
-        parse_mode=ParseMode.MARKDOWN,
+async def render_support(target, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "💬 *Need Assistance?*\n\n"
+        f"• Working Hours: `{WORKING_HOURS}`\n"
+        f"• Contact support: {SUPPORT_CONTACT}\n"
+        "We usually reply within minutes."
     )
-
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]])
+    if hasattr(target, "edit_message_text"):
+        await target.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    else:
+        await target.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 async def handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Re-render the start menu safely (works for both messages and callbacks)
     if update.callback_query:
         await update.callback_query.answer()
     await start(update, context)
+
+# --- Proof capture (photos/docs/text) ---
+async def handle_possible_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    st = USER_STATE.get(user.id, {})
+    if not st.get("awaiting_proof"):
+        return  # ignore unrelated media
+
+    caption = update.effective_message.caption or update.effective_message.text_html or ""
+    username = f"@{user.username}" if user.username else f"ID:{user.id}"
+    ts = now_local().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Forward to admin with details
+    if ADMIN_CHAT_ID:
+        try:
+            # Prefer forward (keeps media), then send a context message
+            fwd = await update.effective_message.forward(chat_id=ADMIN_CHAT_ID)
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    "🧾 *Payment Proof Received*\n"
+                    f"👤 {username}\n"
+                    f"🕒 {ts}\n"
+                    f"🗒 Notes: {caption or '—'}"
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_to_message_id=fwd.message_id,
+            )
+        except Exception as e:
+            logger.warning("Forward to admin failed: %s", e)
+
+    st["awaiting_proof"] = False
+    await update.effective_message.reply_text(
+        "🙏 Thanks! Our team will verify and send your VIP link shortly.",
+    )
+
+async def handle_text_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    st = USER_STATE.get(user.id, {})
+    if st.get("awaiting_proof"):
+        # Treat text as proof/notes
+        await handle_possible_proof(update, context)
+        return
+    # Otherwise, nudge back to menu
+    await update.effective_message.reply_text(
+        "Use /plans to see options or /support to contact us. 👍"
+    )
+
+# --- Admin broadcast ---
+async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ADMIN_CHAT_ID is None or update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    # Usage: /broadcast Your message here
+    msg = " ".join(context.args).strip()
+    if not msg:
+        await update.effective_message.reply_text("Usage: /broadcast Your message")
+        return
+    # Here you would loop over your own user store; for demo we just confirm
+    await update.effective_message.reply_text("Broadcast queued (demo).")
+
+# --- Global error handler ---
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Update caused error: %s", context.error)
+    try:
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"⚠️ *Error:*\n`{repr(context.error)}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+    except Exception:
+        pass
