@@ -1119,13 +1119,12 @@ async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(f"Your ID: `{update.effective_user.id}`", parse_mode=ParseMode.MARKDOWN)
 
 async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(tr(user_lang(update.effective_user.id), "choose_language"), reply_markup=language_menu
- # Continue language command
-async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         tr(user_lang(update.effective_user.id), "choose_language"),
-        reply_markup=language_menu
+        reply_markup=language_menu()
     )
+        except Exception:
+        pass
 
 # -------------------------------
 # PAYMENT HANDLING (Example)
