@@ -1,9 +1,10 @@
-# bot.py — VIP Bot (your copy kept, links as Mini Apps)
+# bot.py
 import os
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
+import httpx
 from fastapi import FastAPI, Request, Header, HTTPException, Response
 from fastapi.responses import JSONResponse
 
@@ -16,302 +17,290 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ==========
-# Config
-# ==========
-def _clean_url(u: str) -> str:
-    u = (u or "").strip()
-    if not u:
-        return ""
-    if not u.startswith("http"):
-        u = "https://" + u.lstrip("/")
-    return u.rstrip("/")
-
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# -----------------------------
+# Configuration (ENV first!)
+# -----------------------------
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # <-- set in Render env; rotate your token!
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN missing")
+    raise RuntimeError("BOT_TOKEN is not set. Add it to your environment.")
 
-BASE_URL = _clean_url(os.getenv("BASE_URL"))
-if not BASE_URL:
-    raise RuntimeError("BASE_URL missing")
-
+BASE_URL = os.getenv("BASE_URL", "https://gpttest-xrfu.onrender.com")  # your public Render URL
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "CHANGE_ME")
+
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "please-change-me-to-a-long-random-string")
 ALLOWED_UPDATES = ["message", "callback_query"]
 
-# Your support/admin
+UPTIME_MONITOR_URL = os.getenv("UPTIME_MONITOR_URL", "https://bot-1-f2wh.onrender.com/uptime")
 SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "@Sebvip")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0")) or None
-ENV_NAME = os.getenv("ENV_NAME", "production")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # set to a chat ID string; optional
 
-# Payment links (we’ll open as Telegram WebApps)
+# Payment Info (static links provided)
 PAYMENT_INFO = {
     "shopify": {
-        "1_month": _clean_url(os.getenv("PAY_1M", "https://nt9qev-td.myshopify.com/cart/55619895394678:1")),
-        "lifetime": _clean_url(os.getenv("PAY_LT", "https://nt9qev-td.myshopify.com/cart/55619898737014:1")),
+        "1_month": "https://nt9qev-td.myshopify.com/cart/55619895394678:1",
+        "lifetime": "https://nt9qev-td.myshopify.com/cart/55619898737014:1",
     },
-    "crypto": {"link": _clean_url(os.getenv("PAY_CRYPTO", "https://t.me/+318ocdUDrbA4ODk0"))},
-    "paypal": os.getenv("PAY_PAYPAL", "@Aieducation ON PAYPAL F&F only we cant process order if it isnt F&F"),
+    "crypto": {"link": "https://t.me/+318ocdUDrbA4ODk0"},
+    "paypal": "@Aieducation ON PAYPAL F&F only we cant process order if it isnt F&F",
 }
 
-# Optional Media Apps hub (mini-app buttons)
-MEDIA_LINKS = [
-    ("VIP Portal", _clean_url(os.getenv("MEDIA_VIP_PORTAL", ""))),
-    ("Telegram Hub", _clean_url(os.getenv("MEDIA_TELEGRAM_HUB", ""))),
-    ("Discord", _clean_url(os.getenv("MEDIA_DISCORD", ""))),
-    ("Website", _clean_url(os.getenv("MEDIA_WEBSITE", ""))),
-]
-HAS_MEDIA = any(url for _, url in MEDIA_LINKS)
-
-# ==========
+# -----------------------------
 # Logging
-# ==========
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("vip-bot")
+# -----------------------------
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("vip-bot")
 
-# ==========
-# App
-# ==========
+# -----------------------------
+# FastAPI + Telegram App
+# -----------------------------
 app = FastAPI()
-tg_app: Optional[Application] = None
-START = datetime.now(timezone.utc)
+telegram_app: Optional[Application] = None
+START_TIME = datetime.now()
 
-# ==========
-# UI (YOUR TEXTS)
-# ==========
-WELCOME_TEXT = (
-    "💎 **Welcome to the VIP Bot!**\n\n"
-    "💎 *Get access to thousands of creators every month!*\n"
-    "⚡ *Instant access to the VIP link sent directly to your email!*\n"
-    "⭐ *Don’t see the model you’re looking for? We’ll add them within 24–72 hours!*\n\n"
-    "📌 Got questions ? VIP link not working ? Contact support 🔍👀"
-)
 
-SELECT_PLAN_TEXT = lambda plan_text: (
-    f"⭐ You have chosen the **{plan_text}** plan.\n\n"
-    "💳 **Apple Pay/Google Pay:** 🚀 Instant VIP access (link emailed immediately).\n"
-    "⚡ **Crypto:** (30 - 60 min wait time), VIP link sent manually.\n"
-    "📧 **PayPal:**(30 - 60 min wait time), VIP link sent manually.\n\n"
-    "🎉 Choose your preferred payment method below and get access today!"
-)
+@app.on_event("startup")
+async def startup_event():
+    """Initialize Telegram app, set webhook, and start the bot."""
+    global telegram_app
+    try:
+        logger.info("Starting up…")
+        telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-SHOPIFY_TEXT = (
-    "🚀 **Instant Access with Apple Pay/Google Pay!**\n\n"
-    "🎁 **Choose Your VIP Plan:**\n"
-    "💎 Lifetime Access: **£20.00 GBP** 🎉\n"
-    "⏳ 1 Month Access: **£10.00 GBP** 🌟\n\n"
-    "🛒 Click below to pay securely and get **INSTANT VIP access** delivered to your email! 📧\n\n"
-    "✅ After payment, click 'I've Paid' to confirm."
-)
+        # Handlers
+        telegram_app.add_handler(CommandHandler("start", start))
+        telegram_app.add_handler(CallbackQueryHandler(handle_subscription, pattern=r"^select_"))
+        telegram_app.add_handler(CallbackQueryHandler(handle_payment, pattern=r"^payment_"))
+        telegram_app.add_handler(CallbackQueryHandler(confirm_payment, pattern=r"^paid$"))
+        telegram_app.add_handler(CallbackQueryHandler(handle_back, pattern=r"^back$"))
+        telegram_app.add_handler(CallbackQueryHandler(handle_support, pattern=r"^support$"))
 
-CRYPTO_TEXT = (
-    "⚡ **Pay Securely with Crypto!**\n\n"
-    f"[Crypto Payment Link]({PAYMENT_INFO['crypto']['link']})\n\n"
-    "💎 **Choose Your Plan:**\n"
-    "⏳ 1 Month Access: **$13.00 USD** 🌟\n"
-    "💎 Lifetime Access: **$27 USD** 🎉\n\n"
-    "✅ Once you've sent the payment, click 'I've Paid' to confirm."
-)
+        await telegram_app.initialize()
+        logger.info("Telegram application initialized.")
 
-PAYPAL_TEXT = (
-    "💸 **Easy Payment with PayPal!**\n\n"
-    f"`{PAYMENT_INFO['paypal']}`\n\n"
-    "💎 **Choose Your Plan:**\n"
-    "⏳ 1 Month Access: **£10.00 GBP** 🌟\n"
-    "💎 Lifetime Access: **£20.00 GBP** 🎉\n\n"
-    "✅ Once payment is complete, click 'I've Paid' to confirm."
-)
+        # Optional: ping uptime monitor
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(UPTIME_MONITOR_URL)
+                logger.info("Uptime monitor status: %s", r.status_code)
+        except Exception as e:
+            logger.warning("Uptime monitoring failed: %s", e)
 
-SUPPORT_PAGE_TEXT = (
-    "💬 **Need Assistance? We're Here to Help!**\n\n"
-    "🕒 **Working Hours:** 8:00 AM - 12:00 AM BST\n"
-    f"📨 For support, contact us directly at:\n"
-    f"👉 {SUPPORT_CONTACT}\n\n"
-    "⚡ Our team is ready to assist you as quickly as possible. "
-    "Thank you for choosing VIP Bot! 💎"
-)
+        # Configure webhook
+        await telegram_app.bot.delete_webhook()
+        await telegram_app.bot.set_webhook(
+            url=WEBHOOK_URL,
+            secret_token=WEBHOOK_SECRET,
+            drop_pending_updates=True,
+            allowed_updates=ALLOWED_UPDATES,
+        )
+        logger.info("Webhook set to %s", WEBHOOK_URL)
 
-PAID_THANKS_TEXT = (
-    "✅ **Payment Received! Thank You!** 🎉\n\n"
-    "📸 Please send a **screenshot** or **transaction ID** to our support team for verification.\n"
-    f"👉 {SUPPORT_CONTACT}\n\n"
-    "⚡ **Important Notice:**\n"
-    "🔗 If you paid via Apple Pay/Google Pay, check your email inbox for the VIP link.\n"
-    "🔗 If you paid via PayPal or Crypto, your VIP link will be sent manually."
-)
+        await telegram_app.start()
+        logger.info("Telegram bot started.")
+    except Exception as e:
+        logger.exception("Error during startup: %s", e)
+        raise
 
-# ==========
-# Keyboards
-# ==========
-def main_menu() -> InlineKeyboardMarkup:
-    rows = [
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Gracefully stop Telegram app on shutdown."""
+    global telegram_app
+    if telegram_app:
+        try:
+            await telegram_app.stop()
+            await telegram_app.shutdown()
+            logger.info("Telegram app stopped.")
+        except Exception as e:
+            logger.exception("Error during shutdown: %s", e)
+
+
+# ---------------
+# Health Endpoints
+# ---------------
+@app.get("/")
+async def root():
+    return {"ok": True, "webhook": WEBHOOK_URL}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+@app.head("/uptime")
+async def head_uptime():
+    return Response(status_code=200)
+
+@app.get("/uptime")
+async def get_uptime():
+    current_time = datetime.now()
+    uptime_duration = current_time - START_TIME
+    return JSONResponse(
+        content={
+            "status": "online",
+            "uptime": str(uptime_duration),
+            "start_time": START_TIME.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )
+
+
+# ---------------
+# Webhook endpoint
+# ---------------
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: Optional[str] = Header(None),
+):
+    # Verify Telegram's secret header
+    if WEBHOOK_SECRET and x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
+        logger.warning("Invalid webhook secret token.")
+        raise HTTPException(status_code=401, detail="Invalid secret token")
+
+    global telegram_app
+    if telegram_app is None:
+        logger.error("Telegram application not initialized.")
+        raise HTTPException(status_code=503, detail="Bot not ready")
+
+    try:
+        data = await request.json()
+        update = Update.de_json(data, telegram_app.bot)
+        logger.debug("Received update: %s", data)
+        await telegram_app.process_update(update)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("Error processing webhook: %s", e)
+        return {"status": "error", "message": str(e)}
+
+
+# -----------------------------
+# Telegram Handlers
+# -----------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
         [InlineKeyboardButton("1 Month (£10.00)", callback_data="select_1_month")],
         [InlineKeyboardButton("Lifetime (£20.00)", callback_data="select_lifetime")],
         [InlineKeyboardButton("Support", callback_data="support")],
     ]
-    if HAS_MEDIA:
-        rows.insert(2, [InlineKeyboardButton("Media Apps", callback_data="media")])
-    return InlineKeyboardMarkup(rows)
+    text = (
+        "💎 *Welcome to the VIP Bot!*\n\n"
+        "💎 *Get access to thousands of creators every month!*\n"
+        "⚡ *Instant access to the VIP link sent directly to your email!*\n"
+        "⭐ *Don’t see the model you’re looking for? We’ll add them within 24–72 hours!*\n\n"
+        "📌 Got questions? VIP link not working? Contact support 🔍👀"
+    )
+    await update.effective_message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
-def payment_selector(plan: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+
+async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    plan = query.data.split("_", 1)[1]
+    plan_text = "LIFETIME" if plan == "lifetime" else "1 MONTH"
+    keyboard = [
         [InlineKeyboardButton("💳 Apple Pay/Google Pay 🚀 (Instant Access)", callback_data=f"payment_shopify_{plan}")],
         [InlineKeyboardButton("⚡ Crypto ⏳ (30 - 60 min wait time)", callback_data=f"payment_crypto_{plan}")],
         [InlineKeyboardButton("📧 PayPal 💌 (30 - 60 min wait time)", callback_data=f"payment_paypal_{plan}")],
         [InlineKeyboardButton("💬 Support", callback_data="support")],
         [InlineKeyboardButton("🔙 Go Back", callback_data="back")],
-    ])
+    ]
 
-def shopify_menu_webapp() -> InlineKeyboardMarkup:
-    # Mini‑app buttons for both plans
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💎 Lifetime (£20.00)", web_app=WebAppInfo(url=PAYMENT_INFO["shopify"]["lifetime"]))],
-        [InlineKeyboardButton("⏳ 1 Month (£10.00)", web_app=WebAppInfo(url=PAYMENT_INFO["shopify"]["1_month"]))],
-        [InlineKeyboardButton("✅ I've Paid", callback_data="paid")],
-        [InlineKeyboardButton("🔙 Go Back", callback_data="back")],
-    ])
-
-def crypto_menu_webapp() -> InlineKeyboardMarkup:
-    # Open crypto link in Telegram webview as a mini‑app
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Open Crypto Link", web_app=WebAppInfo(url=PAYMENT_INFO["crypto"]["link"]))],
-        [InlineKeyboardButton("✅ I've Paid", callback_data="paid")],
-        [InlineKeyboardButton("🔙 Go Back", callback_data="back")],
-    ])
-
-def paypal_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ I've Paid", callback_data="paid")],
-        [InlineKeyboardButton("🔙 Go Back", callback_data="back")],
-    ])
-
-def media_menu_webapps() -> InlineKeyboardMarkup:
-    rows = []
-    for label, url in MEDIA_LINKS:
-        if url:
-            rows.append([InlineKeyboardButton(label, web_app=WebAppInfo(url=url))])
-    rows.append([InlineKeyboardButton("🔙 Go Back", callback_data="back")])
-    return InlineKeyboardMarkup(rows)
-
-# ==========
-# Startup / Shutdown
-# ==========
-@app.on_event("startup")
-async def on_start():
-    global tg_app
-    log.info("Starting bot…")
-
-    tg_app = Application.builder().token(BOT_TOKEN).build()
-
-    # Commands
-    tg_app.add_handler(CommandHandler("start", start))
-    tg_app.add_handler(CommandHandler("support", support_cmd))
-    tg_app.add_handler(CommandHandler("status", status_cmd))
-
-    # Callbacks
-    tg_app.add_handler(CallbackQueryHandler(handle_subscription, pattern=r"^select_"))
-    tg_app.add_handler(CallbackQueryHandler(handle_payment, pattern=r"^payment_"))
-    tg_app.add_handler(CallbackQueryHandler(confirm_payment, pattern=r"^paid$"))
-    tg_app.add_handler(CallbackQueryHandler(handle_back, pattern=r"^back$"))
-    tg_app.add_handler(CallbackQueryHandler(handle_support, pattern=r"^support$"))
-    tg_app.add_handler(CallbackQueryHandler(handle_media, pattern=r"^media$"))
-
-    await tg_app.initialize()
-
-    await tg_app.bot.delete_webhook()
-    await tg_app.bot.set_webhook(
-        url=WEBHOOK_URL,
-        secret_token=WEBHOOK_SECRET,
-        drop_pending_updates=True,
-        allowed_updates=ALLOWED_UPDATES,
+    message = (
+        f"⭐ You have chosen the *{plan_text}* plan.\n\n"
+        "💳 *Apple Pay/Google Pay:* 🚀 Instant VIP access (link emailed immediately).\n"
+        "⚡ *Crypto:* (30 - 60 min wait time), VIP link sent manually.\n"
+        "📧 *PayPal:* (30 - 60 min wait time), VIP link sent manually.\n\n"
+        "🎉 Choose your preferred payment method below and get access today!"
     )
-    log.info("Webhook set to %s", WEBHOOK_URL)
-
-    await tg_app.start()
-    log.info("Bot online.")
-
-@app.on_event("shutdown")
-async def on_stop():
-    if tg_app:
-        await tg_app.stop()
-        await tg_app.shutdown()
-        log.info("Bot stopped.")
-
-# ==========
-# HTTP
-# ==========
-@app.get("/")
-async def root():
-    return {"ok": True, "env": ENV_NAME, "webhook": WEBHOOK_URL}
-
-@app.head(WEBHOOK_PATH)
-async def head_webhook():
-    return Response(status_code=200)
-
-@app.post(WEBHOOK_PATH)
-async def webhook(request: Request, x_telegram_bot_api_secret_token: Optional[str] = Header(None)):
-    if WEBHOOK_SECRET and x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
-        raise HTTPException(status_code=401, detail="Invalid secret token")
-    if tg_app is None:
-        raise HTTPException(status_code=503, detail="Bot not ready")
-
-    data = await request.json()
-    update = Update.de_json(data, tg_app.bot)
-    await tg_app.process_update(update)
-    return {"status": "ok"}
-
-# ==========
-# Handlers (YOUR TEXTS)
-# ==========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(
-        WELCOME_TEXT,
+    await query.edit_message_text(
+        text=message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu(),
     )
 
-async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    plan = q.data.split("_", 1)[1]  # 1_month | lifetime
-    plan_text = "LIFETIME" if plan == "lifetime" else "1 MONTH"
-
-    await q.edit_message_text(
-        SELECT_PLAN_TEXT(plan_text),
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=payment_selector(plan),
-    )
 
 async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    _, method, plan = q.data.split("_", 2)
-    context.user_data["plan_text"] = "LIFETIME" if plan == "lifetime" else "1 MONTH"
+    query = update.callback_query
+    await query.answer()
+
+    _, method, plan = query.data.split("_", 2)
+    plan_text = "LIFETIME" if plan == "lifetime" else "1 MONTH"
+
+    context.user_data["plan_text"] = plan_text
     context.user_data["method"] = method
 
     if method == "shopify":
-        await q.edit_message_text(SHOPIFY_TEXT, parse_mode=ParseMode.MARKDOWN, reply_markup=shopify_menu_webapp())
+        message = (
+            "🚀 *Instant Access with Apple Pay/Google Pay!*\n\n"
+            "🎁 *Choose Your VIP Plan:*\n"
+            "💎 Lifetime Access: *£20.00 GBP* 🎉\n"
+            "⏳ 1 Month Access: *£10.00 GBP* 🌟\n\n"
+            "🛒 Tap a button to pay securely and get *INSTANT VIP access* delivered to your email! 📧\n\n"
+            "✅ After payment, tap *I've Paid* to confirm."
+        )
+        # URL buttons are simpler & more reliable than WebApp for plain links
+        keyboard = [
+            [InlineKeyboardButton("💎 Lifetime (£20.00)", url=PAYMENT_INFO["shopify"]["lifetime"])],
+            [InlineKeyboardButton("⏳ 1 Month (£10.00)", url=PAYMENT_INFO["shopify"]["1_month"])],
+            [InlineKeyboardButton("✅ I've Paid", callback_data="paid")],
+            [InlineKeyboardButton("🔙 Go Back", callback_data="back")],
+        ]
     elif method == "crypto":
-        await q.edit_message_text(CRYPTO_TEXT, parse_mode=ParseMode.MARKDOWN, reply_markup=crypto_menu_webapp(), disable_web_page_preview=True)
+        message = (
+            "⚡ *Pay Securely with Crypto!*\n\n"
+            f"[Crypto Payment Link]({PAYMENT_INFO['crypto']['link']})\n\n"
+            "💎 *Choose Your Plan:*\n"
+            "⏳ 1 Month Access: *$13.00 USD* 🌟\n"
+            "💎 Lifetime Access: *$27 USD* 🎉\n\n"
+            "✅ Once you've sent the payment, tap *I've Paid* to confirm."
+        )
+        keyboard = [
+            [InlineKeyboardButton("✅ I've Paid", callback_data="paid")],
+            [InlineKeyboardButton("🔙 Go Back", callback_data="back")],
+        ]
     elif method == "paypal":
-        await q.edit_message_text(PAYPAL_TEXT, parse_mode=ParseMode.MARKDOWN, reply_markup=paypal_menu())
+        message = (
+            "💸 *Easy Payment with PayPal!*\n\n"
+            f"`{PAYMENT_INFO['paypal']}`\n\n"
+            "💎 *Choose Your Plan:*\n"
+            "⏳ 1 Month Access: *£10.00 GBP* 🌟\n"
+            "💎 Lifetime Access: *£20.00 GBP* 🎉\n\n"
+            "✅ Once payment is complete, tap *I've Paid* to confirm."
+        )
+        keyboard = [
+            [InlineKeyboardButton("✅ I've Paid", callback_data="paid")],
+            [InlineKeyboardButton("🔙 Go Back", callback_data="back")],
+        ]
     else:
-        await q.edit_message_text("Unknown payment method.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Go Back", callback_data="back")]]))
+        message = "Unknown payment method."
+        keyboard = [[InlineKeyboardButton("🔙 Go Back", callback_data="back")]]
+
+    await query.edit_message_text(
+        text=message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
 
 async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
+    query = update.callback_query
+    await query.answer()
 
     plan_text = context.user_data.get("plan_text", "N/A")
     method = context.user_data.get("method", "N/A")
-    username = q.from_user.username or "No Username"
-    current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    username = query.from_user.username or "No Username"
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Notify admin if configured
     if ADMIN_CHAT_ID:
         try:
             await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
+                chat_id=int(ADMIN_CHAT_ID),
                 text=(
                     "📝 *Payment Notification*\n"
                     f"👤 *User:* @{username}\n"
@@ -321,45 +310,41 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ),
                 parse_mode=ParseMode.MARKDOWN,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to notify admin: %s", e)
 
-    await q.edit_message_text(PAID_THANKS_TEXT, parse_mode=ParseMode.MARKDOWN)
+    await query.edit_message_text(
+        text=(
+            "✅ *Payment Received! Thank You!* 🎉\n\n"
+            "📸 Please send a *screenshot* or *transaction ID* to our support team for verification.\n"
+            f"👉 {SUPPORT_CONTACT}\n\n"
+            "⚡ *Important Notice:*\n"
+            "🔗 If you paid via Apple Pay/Google Pay, check your email inbox for the VIP link.\n"
+            "🔗 If you paid via PayPal or Crypto, your VIP link will be sent manually."
+        ),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
 
 async def handle_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    await q.edit_message_text(
-        SUPPORT_PAGE_TEXT,
-        parse_mode=ParseMode.MARKDOWN,
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        text=(
+            "💬 *Need Assistance? We're Here to Help!*\n\n"
+            "🕒 *Working Hours:* 8:00 AM - 12:00 AM BST\n"
+            "📨 For support, contact us directly at:\n"
+            f"👉 {SUPPORT_CONTACT}\n\n"
+            "⚡ Our team is ready to assist you as quickly as possible.\n"
+            "Thank you for choosing VIP Bot! 💎"
+        ),
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Go Back", callback_data="back")]]),
+        parse_mode=ParseMode.MARKDOWN,
     )
 
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    if not HAS_MEDIA:
-        await q.edit_message_text("No media apps configured.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Go Back", callback_data="back")]]))
-        return
-    await q.edit_message_text(
-        "🎬 **Media Apps**\n\nOpen inside Telegram.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=media_menu_webapps(),
-        disable_web_page_preview=True,
-    )
 
 async def handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Re-render the start menu safely (works for both messages and callbacks)
     if update.callback_query:
         await update.callback_query.answer()
     await start(update, context)
-
-# Simple command mirrors
-async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(SUPPORT_PAGE_TEXT, parse_mode=ParseMode.MARKDOWN)
-
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    up = int((datetime.now(timezone.utc) - START).total_seconds())
-    await update.effective_message.reply_text(
-        f"*Status*: Online\n*Env*: `{ENV_NAME}`\n*Uptime*: `{up}s`\n*Webhook*: `{WEBHOOK_URL}`",
-        parse_mode=ParseMode.MARKDOWN,
-    )
