@@ -13,7 +13,6 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    InputFile,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -26,26 +25,42 @@ from telegram.ext import (
 )
 
 # =========================
-# Configuration (ENV first)
+# Config + URL sanitizing
 # =========================
+def clean_base_url(url: str) -> str:
+    """Force https, trim whitespace, drop trailing slash."""
+    if not url:
+        return ""
+    url = url.strip()
+    if not url.startswith("http"):
+        url = "https://" + url.lstrip("/")
+    return url.rstrip("/")
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set. Add it to env and redeploy.")
+    raise RuntimeError("BOT_TOKEN is not set. Add it in Render → Environment.")
 
-BASE_URL = os.getenv("BASE_URL", "https://your-service.onrender.com")
+BASE_URL = clean_base_url(os.getenv("BASE_URL", ""))
+if not BASE_URL or "your-service.onrender.com" in BASE_URL:
+    raise RuntimeError(
+        "BASE_URL is missing or still the placeholder. "
+        "Set BASE_URL to your public Render URL (e.g., https://your-app.onrender.com)."
+    )
+
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "CHANGE_THIS_TO_A_LONG_RANDOM_STRING")
 
-SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "@Sebvip")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0")) or None  # optional
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "CHANGE_ME_TO_A_LONG_RANDOM_STRING")
 ALLOWED_UPDATES = ["message", "callback_query"]
 
-# Optional controls
-MAINTENANCE_MODE = os.getenv("MAINTENANCE_MODE", "0") == "1"  # if 1, show maintenance banner
-WORKING_HOURS = os.getenv("WORKING_HOURS", "08:00-00:00")  # for info display only
-TZ_OFFSET = int(os.getenv("TZ_OFFSET_MINUTES", "0"))  # minutes offset if you want localish times
+SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "@Sebvip")
+ADMIN_CHAT_ID_ENV = os.getenv("ADMIN_CHAT_ID", "")
+ADMIN_CHAT_ID = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV.isdigit() else None
 
+# Optional settings
+MAINTENANCE_MODE = os.getenv("MAINTENANCE_MODE", "0") == "1"
+WORKING_HOURS = os.getenv("WORKING_HOURS", "08:00-00:00")
+TZ_OFFSET = int(os.getenv("TZ_OFFSET_MINUTES", "0"))
 UPTIME_MONITOR_URL = os.getenv("UPTIME_MONITOR_URL", "")
 ENV_NAME = os.getenv("ENV_NAME", "production")
 
@@ -63,10 +78,21 @@ PAYMENT_INFO = {
 # Logging
 # ==========
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("vip-bot")
+
+logger.info("Loaded BASE_URL = %r", BASE_URL)
+logger.info("Webhook will be set to %r", WEBHOOK_URL)
+
+# Preflight reachability check (best-effort)
+try:
+    with httpx.Client(timeout=5.0, verify=True) as client:
+        r = client.get(BASE_URL)
+        logger.info("Preflight check to BASE_URL returned: %s", r.status_code)
+except Exception as e:
+    logger.warning("Preflight check failed: %s", e)
 
 # ===============================
 # FastAPI + Telegram integration
@@ -75,16 +101,15 @@ app = FastAPI()
 telegram_app: Optional[Application] = None
 START_TIME = datetime.now(timezone.utc)
 
-# Simple in-memory rate limit + state
+# Simple in-memory rate limit + user state
 RATE_LIMIT_BUCKET: Dict[int, float] = {}
-USER_STATE: Dict[int, Dict[str, bool]] = {}  # e.g., {"awaiting_proof": True}
+USER_STATE: Dict[int, Dict[str, bool]] = {}
 
 def now_local() -> datetime:
     return datetime.now(timezone.utc) + timedelta(minutes=TZ_OFFSET)
 
 def human_uptime() -> str:
     delta = datetime.now(timezone.utc) - START_TIME
-    # Simple humanize
     d = delta.days
     s = delta.seconds
     h = s // 3600
@@ -92,7 +117,6 @@ def human_uptime() -> str:
     return f"{d}d {h}h {m}m"
 
 def ratelimited(user_id: int, seconds: int = 2) -> bool:
-    """Return True if still under rate-limit; otherwise False and set new window."""
     last = RATE_LIMIT_BUCKET.get(user_id, 0.0)
     now = datetime.now().timestamp()
     if now - last < seconds:
@@ -110,6 +134,7 @@ def banner() -> str:
 async def startup_event():
     global telegram_app
     logger.info("Starting VIP Bot (%s)…", ENV_NAME)
+
     telegram_app = Application.builder().token(BOT_TOKEN).build()
 
     # Commands
@@ -119,8 +144,6 @@ async def startup_event():
     telegram_app.add_handler(CommandHandler("support", support_cmd))
     telegram_app.add_handler(CommandHandler("terms", terms_cmd))
     telegram_app.add_handler(CommandHandler("status", status_cmd))
-
-    # Admin-only broadcast: /broadcast Your message...
     telegram_app.add_handler(CommandHandler("broadcast", admin_broadcast))
 
     # Callback flows
@@ -140,7 +163,7 @@ async def startup_event():
 
     await telegram_app.initialize()
 
-    # Optional: ping uptime monitor once
+    # Optional: ping uptime monitor
     if UPTIME_MONITOR_URL:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -158,6 +181,7 @@ async def startup_event():
         allowed_updates=ALLOWED_UPDATES,
     )
     logger.info("Webhook set: %s", WEBHOOK_URL)
+
     await telegram_app.start()
     logger.info("Telegram bot started.")
 
@@ -245,7 +269,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if ratelimited(user.id, seconds=1):
         return
-
     text = (
         f"{banner()}"
         "💎 *Welcome to VIP Bot!*\n\n"
@@ -321,11 +344,14 @@ async def show_plans(target, context: ContextTypes.DEFAULT_TYPE):
         "• Lifetime – £20.00\n\n"
         "_Tip: Apple/Google Pay = instant email delivery_"
     )
-    await target.edit_message_text(
-        msg, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard)
-    ) if hasattr(target, "edit_message_text") else target.reply_text(
-        msg, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    if hasattr(target, "edit_message_text"):
+        await target.edit_message_text(
+            msg, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await target.reply_text(
+            msg, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -340,10 +366,7 @@ async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
         [InlineKeyboardButton("💬 Support", callback_data="support")],
         [InlineKeyboardButton("🔙 Back", callback_data="back")],
     ]
-    msg = (
-        f"⭐ You chose *{plan_text}*.\n\n"
-        "Pick a payment method below:"
-    )
+    msg = f"⭐ You chose *{plan_text}*.\n\nPick a payment method below:"
     await q.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -403,11 +426,9 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     method = context.user_data.get("method", "N/A")
     ts = now_local().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Flip state to request proof
     st = USER_STATE.setdefault(user.id, {})
     st["awaiting_proof"] = True
 
-    # Notify admin
     if ADMIN_CHAT_ID:
         try:
             await context.bot.send_message(
@@ -427,7 +448,7 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(
         text=(
             "✅ *Thanks!*\n\n"
-            "If you haven’t received instant email access (Apple/Google Pay), please *send a screenshot* or *transaction ID* here now.\n"
+            "If you didn’t get instant email access yet, please *send a screenshot* or *transaction ID* here now.\n"
             f"Or message support: {SUPPORT_CONTACT}\n\n"
             "_This helps us verify quickly._"
         ),
@@ -461,16 +482,14 @@ async def handle_possible_proof(update: Update, context: ContextTypes.DEFAULT_TY
     user = update.effective_user
     st = USER_STATE.get(user.id, {})
     if not st.get("awaiting_proof"):
-        return  # ignore unrelated media
+        return
 
-    caption = update.effective_message.caption or update.effective_message.text_html or ""
+    caption = (update.effective_message.caption or "").strip()
     username = f"@{user.username}" if user.username else f"ID:{user.id}"
     ts = now_local().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Forward to admin with details
     if ADMIN_CHAT_ID:
         try:
-            # Prefer forward (keeps media), then send a context message
             fwd = await update.effective_message.forward(chat_id=ADMIN_CHAT_ID)
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
@@ -488,31 +507,28 @@ async def handle_possible_proof(update: Update, context: ContextTypes.DEFAULT_TY
 
     st["awaiting_proof"] = False
     await update.effective_message.reply_text(
-        "🙏 Thanks! Our team will verify and send your VIP link shortly.",
+        "🙏 Thanks! Our team will verify and send your VIP link shortly."
     )
 
 async def handle_text_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     st = USER_STATE.get(user.id, {})
     if st.get("awaiting_proof"):
-        # Treat text as proof/notes
         await handle_possible_proof(update, context)
         return
-    # Otherwise, nudge back to menu
     await update.effective_message.reply_text(
         "Use /plans to see options or /support to contact us. 👍"
     )
 
-# --- Admin broadcast ---
+# --- Admin broadcast (demo stub) ---
 async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_CHAT_ID is None or update.effective_user.id != ADMIN_CHAT_ID:
         return
-    # Usage: /broadcast Your message here
     msg = " ".join(context.args).strip()
     if not msg:
         await update.effective_message.reply_text("Usage: /broadcast Your message")
         return
-    # Here you would loop over your own user store; for demo we just confirm
+    # Here you would iterate over your own user store and send messages.
     await update.effective_message.reply_text("Broadcast queued (demo).")
 
 # --- Global error handler ---
