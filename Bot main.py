@@ -7,8 +7,8 @@ from datetime import datetime
 from fastapi.responses import JSONResponse
 
 # Constants
-BOT_TOKEN = "7709257840:AAHHDafzkhvwMcHMfQuNd1XJTFlTAAd14As"
-WEBHOOK_URL = "https://bot-1-f2wh.onrender.com/webhook"
+BOT_TOKEN = "7584255639:AAGVGKfZ4Ac0EMV4iuUjxRta9Ws08u1qJn4"
+WEBHOOK_URL = "https://gpttest-xrfu.onrender.com"
 UPTIME_MONITOR_URL = "https://bot-1-f2wh.onrender.com/uptime"
 SUPPORT_CONTACT = "@Sebvip"
 ADMIN_CHAT_ID = 7914196017  # Replace with the admin's chat ID
